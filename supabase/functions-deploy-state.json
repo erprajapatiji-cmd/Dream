@@ -1,0 +1,17 @@
+{
+  "projectId": "71312633",
+  "functions": {
+    "ball-by-ball-api": {
+      "hasChanged": false,
+      "hash": "fef265520d8c39542192f8845071dfe29b9d0a937c2d0732889d5cfe48d67ed9"
+    },
+    "csv-import": {
+      "hasChanged": false,
+      "hash": "7a6dd847a4608ea2b128ce23b6aa1cc9820c625018d6c56d5567eb384d0815f9"
+    },
+    "source-code": {
+      "hasChanged": false,
+      "hash": "5f93bd3da022457dd00ad2656e35eda16aef7574394faf2c416de158f5ee1eb5"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+[functions.ball-by-ball-api]
+verify_jwt = false
+
+[functions.csv-import]
+verify_jwt = false
+
+[functions.source-code]
+verify_jwt = false
