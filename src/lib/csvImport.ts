@@ -142,7 +142,12 @@ async function postImport(payload: {
         }
       );
       clearTimeout(timeoutId);
-      if (!response.ok) throw new Error(`Import service returned ${response.status}`);
+      if (!response.ok) {
+        const retryAfter = Number.parseInt(response.headers.get("Retry-After") ?? "", 10);
+        const errorText = await response.text().catch(() => "");
+        const detail = errorText ? `: ${errorText.slice(0, 160)}` : "";
+        throw new Error(`Import service returned ${response.status}${detail}${retryAfter ? `|retry-after=${retryAfter}` : ""}`);
+      }
       const data = await response.json();
       if (!data || typeof data !== "object") throw new Error("Invalid response from import service");
       if (data.error) throw new Error(String(data.error));
@@ -154,7 +159,12 @@ async function postImport(payload: {
     } catch (err) {
       const isAbort = err instanceof DOMException && err.name === "AbortError";
       lastError = err instanceof Error ? err : new Error(String(err));
-      if (attempt < 2) await new Promise<void>((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+      if (attempt < 2) {
+        const retryAfterMatch = lastError.message.match(/\|retry-after=(\d+)/);
+        const retryAfterMs = retryAfterMatch ? Number.parseInt(retryAfterMatch[1], 10) * 1000 : 0;
+        const delay = Math.max(retryAfterMs, 1500 * 2 ** attempt);
+        await new Promise<void>((resolve) => setTimeout(resolve, delay));
+      }
       if (isAbort) {
         console.warn(`Import batch timed out after ${EDGE_FUNCTION_TIMEOUT_MS}ms, retrying...`);
       }
@@ -170,7 +180,7 @@ function chunks<T>(items: T[], size: number): T[][] {
 }
 
 // Send up to CONCURRENCY batches in parallel to keep the network pipeline full.
-const CONCURRENCY = 3;
+const CONCURRENCY = 2;
 const MATCH_BATCH = 2000;
 const BALL_BATCH = 2000;
 

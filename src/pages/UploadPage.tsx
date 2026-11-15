@@ -123,12 +123,14 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
     const skippedFiles: string[] = [];
 
     try {
-      for (let i = 0; i < selectedFiles.length; i++) {
-        const selectedFile = selectedFiles[i];
+      let completedFiles = 0;
+      const FILE_CONCURRENCY = 3;
+
+      const processFile = async (selectedFile: File, fileNumber: number): Promise<void> => {
         setUploadProgress({
           total: selectedFiles.length,
-          current: i,
-          phase: `Processing file ${i + 1} of ${selectedFiles.length}: ${selectedFile.name}`,
+          current: completedFiles,
+          phase: `Processing file ${fileNumber} of ${selectedFiles.length}: ${selectedFile.name}`,
           committedRows: 0,
         });
 
@@ -142,7 +144,7 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
             totals.innings += jsonCounts.innings;
             totals.balls += jsonCounts.balls;
             if (parsed.deliveries.length === 0) skippedFiles.push(selectedFile.name);
-            continue;
+            return;
           }
 
           const headers = await readCSVHeaders(selectedFile);
@@ -157,18 +159,18 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
             totals.innings += combinedCounts.innings;
             totals.balls += combinedCounts.balls;
             if (parsed.deliveries.length === 0) skippedFiles.push(selectedFile.name);
-            continue;
+            return;
           }
 
           if (/_info\.csv$/i.test(selectedFile.name)) {
             skippedFiles.push(selectedFile.name);
-            continue;
+            return;
           }
 
           const detectedFormat = detectFormatFromHeaders(headers);
           if (detectedFormat === "matches") {
             skippedFiles.push(selectedFile.name);
-            continue;
+            return;
           }
           if (detectedFormat === "unknown" && !selectedFile.name.toLowerCase().endsWith(".csv")) {
             throw new Error(`${selectedFile.name}: could not detect CSV format.`);
@@ -181,7 +183,20 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
         } catch (fileErr) {
           console.error(`Import failed for ${selectedFile.name}`, fileErr);
           failedFiles.push(selectedFile.name);
+        } finally {
+          completedFiles += 1;
+          setUploadProgress({
+            total: selectedFiles.length,
+            current: completedFiles,
+            phase: `Processed ${completedFiles.toLocaleString()} of ${selectedFiles.length.toLocaleString()} files`,
+            committedRows: totals.balls,
+          });
         }
+      };
+
+      for (let i = 0; i < selectedFiles.length; i += FILE_CONCURRENCY) {
+        const group = selectedFiles.slice(i, i + FILE_CONCURRENCY);
+        await Promise.all(group.map((file, offset) => processFile(file, i + offset + 1)));
       }
 
       if (totals.matches === 0 && totals.balls === 0) {
