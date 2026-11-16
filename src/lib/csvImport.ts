@@ -9,6 +9,7 @@ export interface CsvImportResult {
 
 interface MatchPayload {
   match_id: string;
+  match_format: string;
   season: string | null;
   city: string | null;
   date: string | null;
@@ -52,6 +53,42 @@ function optionalField(row: ParsedMatchRow, ...names: string[]): string | null {
   return value;
 }
 
+const MATCH_FORMATS = ["T20", "ODI", "Test", "T10", "First Class", "List A", "Unknown"] as const;
+export type MatchFormat = (typeof MATCH_FORMATS)[number];
+
+export function normalizeMatchFormat(value: string): MatchFormat {
+  const normalized = value.trim().toLowerCase().replace(/[._-]+/g, " ").replace(/\s+/g, " ");
+  if (!normalized) return "Unknown";
+  if (/^(t20|t20i|twenty20|twenty 20|20 overs?)$/.test(normalized)) return "T20";
+  if (/^(t10|ten10|ten 10|10 overs?)$/.test(normalized)) return "T10";
+  if (/^(odi|one day|one day international|50 overs?)$/.test(normalized)) return "ODI";
+  if (/^(test|test match|five day|five day test)$/.test(normalized)) return "Test";
+  if (/^(first class|first-class)$/.test(normalized)) return "First Class";
+  if (/^(list a|list-a)$/.test(normalized)) return "List A";
+  if (/\b(t20|twenty20)\b/.test(normalized) || /\b(ipl|bbl|psl|cpl|t20 world cup)\b/.test(normalized)) return "T20";
+  if (/\b(odi|one day)\b/.test(normalized)) return "ODI";
+  if (/\b(test|first class)\b/.test(normalized)) return normalized.includes("first class") ? "First Class" : "Test";
+  if (/\blist a\b/.test(normalized)) return "List A";
+  if (/\bt10\b/.test(normalized)) return "T10";
+  return "Unknown";
+}
+
+export function detectMatchFormat(row: ParsedMatchRow): MatchFormat {
+  const explicit = getField(row, "match_type", "matchtype", "format", "match_format", "matchformat");
+  const explicitFormat = normalizeMatchFormat(explicit);
+  if (explicitFormat !== "Unknown") return explicitFormat;
+
+  const event = getField(row, "event", "event_name", "eventname", "competition", "competition_name");
+  const eventFormat = normalizeMatchFormat(event);
+  if (eventFormat !== "Unknown") return eventFormat;
+
+  const overs = Number.parseFloat(getField(row, "overs", "over_limit", "overlimit"));
+  if (overs === 20) return "T20";
+  if (overs === 10) return "T10";
+  if (overs === 50) return "ODI";
+  return "Unknown";
+}
+
 function toMatchPayload(row: ParsedMatchRow): MatchPayload | null {
   const team1 = optionalField(row, "team1", "Team1", "team1name", "teamone");
   const team2 = optionalField(row, "team2", "Team2", "team2name", "teamtwo");
@@ -59,6 +96,7 @@ function toMatchPayload(row: ParsedMatchRow): MatchPayload | null {
 
   return {
     match_id: uniqueMatchId(row) || crypto.randomUUID(),
+    match_format: detectMatchFormat(row),
     season: optionalField(row, "season", "Season", "seasonyear", "year"),
     city: optionalField(row, "city", "City", "cityname"),
     date: optionalField(row, "date", "Date", "matchdate"),

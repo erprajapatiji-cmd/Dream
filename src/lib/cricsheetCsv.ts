@@ -38,6 +38,9 @@ export function parseCricsheetInfo(text: string, matchId: string): ParsedMatchRo
     else if (key === "winner") values.result = value;
     else if (key === "winnerruns") values.result_margin = `${value} runs`;
     else if (key === "winnerwickets") values.result_margin = `${value} wickets`;
+    else if (key === "matchtype" || key === "matchformat" || key === "format") values.match_type = value;
+    else if (key === "overs" || key === "overlimit") values.overs = value;
+    else if (key === "event" || key === "competition") values.event_name = value;
     else if (key === "outcome") {
       if (normalizeHeader(columns[2]) === "winner") values.result = columns.slice(3).filter(Boolean).join(", ");
       if (normalizeHeader(columns[2]) === "by") values.result_margin = columns.slice(3).filter(Boolean).join(" ");

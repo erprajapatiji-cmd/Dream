@@ -12,6 +12,7 @@ const corsHeaders = {
 
 interface MatchRecord {
   match_id: string;
+  match_format?: string | null;
   season?: string | null;
   city?: string | null;
   date?: string | null;
@@ -53,6 +54,11 @@ interface ImportRequest {
 }
 
 const BATCH = 300;
+const MATCH_FORMATS = new Set(["T20", "ODI", "Test", "T10", "First Class", "List A", "Unknown"]);
+
+function normalizeMatchFormat(value: string | null | undefined): string {
+  return MATCH_FORMATS.has(value ?? "") ? value as string : "Unknown";
+}
 
 function isMissingTeam(value: string | null | undefined): boolean {
   return !value || /^(tbd|unknown|n\/a|na|null|undefined)$/i.test(value.trim());
@@ -106,6 +112,7 @@ Deno.serve(async (req: Request) => {
       if (rows.length === 0) return json({ committed: 0 });
       const cleanedRows = rows.map((row) => ({
         ...row,
+        match_format: normalizeMatchFormat(row.match_format),
         team1: isMissingTeam(row.team1) ? null : row.team1?.trim() || null,
         team2: isMissingTeam(row.team2) ? null : row.team2?.trim() || null,
       }));
@@ -132,7 +139,7 @@ Deno.serve(async (req: Request) => {
       // 1. Upsert match stubs (only match_id, no detail overwrite).
       let matchesCreated = 0;
       if (stubs.length > 0) {
-        const stubRows = stubs.map((match_id) => ({ match_id }));
+        const stubRows = stubs.map((match_id) => ({ match_id, match_format: "Unknown" }));
         for (const batch of chunks(stubRows, BATCH)) {
           const { data, error } = await admin
             .from("matches")

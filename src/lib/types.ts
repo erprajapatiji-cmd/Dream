@@ -1,6 +1,7 @@
 export interface Match {
   id: string;
   match_id: string;
+  match_format: string;
   season: string | null;
   city: string | null;
   date: string | null;

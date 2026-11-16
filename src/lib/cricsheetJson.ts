@@ -41,6 +41,9 @@ export function parseCricsheetJson(raw: string, matchId: string): ParsedCricshee
 
   const matchRow: ParsedMatchRow = {
     match_id: matchId,
+    match_type: str(info.match_type),
+    overs: str(info.overs),
+    event_name: str(asObject(info.event)?.name),
     season: str(info.season),
     city: str(info.city),
     date: str(dates[0]).replace(/\//g, "-"),
