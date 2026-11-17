@@ -52,7 +52,7 @@ export async function classifyFile(file: File): Promise<ClassifiedFile> {
     return { file, kind: "unknown", matchId };
   }
 
-  if (normalizeHeader(headers[0]) === "version") {
+  if (normalizeHeader(headers[0]) === "version" || normalizeHeader(headers[0]) === "info") {
     return { file, kind: "cricsheet-combined", matchId };
   }
 
