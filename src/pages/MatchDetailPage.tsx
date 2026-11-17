@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { ArrowLeft, Calendar, MapPin, Trophy, Loader2, AlertCircle, User, Users } from "lucide-react";
+import { ArrowLeft, MapPin, Trophy, Loader2, AlertCircle, User, Users, Tag } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import type { Match, Innings, BallByBall } from "@/lib/types";
 
@@ -197,6 +197,7 @@ export default function MatchDetailPage({ matchId, onNavigate }: MatchDetailPage
 
           <div className="mt-6 grid grid-cols-1 gap-3 text-sm text-slate-400 sm:grid-cols-2 lg:grid-cols-4">
             {match.venue && <div className="flex items-center gap-2"><MapPin size={14} className="text-slate-600" /><span className="truncate">{match.venue}</span></div>}
+            {match.match_format && match.match_format !== "Unknown" && <div className="flex items-center gap-2"><Tag size={14} className="text-slate-600" /><span>{match.match_format}</span></div>}
             {match.toss_winner && <div>Toss: <span className="text-slate-300">{match.toss_winner}</span> chose {match.toss_decision}</div>}
             {match.umpire1 && <div className="flex items-center gap-2"><User size={14} className="text-slate-600" />{match.umpire1}{match.umpire2 ? `, ${match.umpire2}` : ""}</div>}
             {match.result && <div className="font-medium text-slate-200">{match.result}{match.result_margin ? ` — ${match.result_margin}` : ""}</div>}

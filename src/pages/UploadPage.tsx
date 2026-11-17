@@ -1,9 +1,10 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { Upload, CheckCircle, AlertCircle, Loader2, ArrowLeft, Database, FilePlus2, FolderOpen } from "lucide-react";
-import { parseCSVStream, readCSVHeaders, detectFormatFromHeaders, normalizeHeader } from "@/lib/csv";
+import { Upload, CheckCircle, AlertCircle, Loader2, ArrowLeft, Database, FilePlus2, FolderOpen, Info, AlertTriangle } from "lucide-react";
+import { parseCSVStream, parseCSV, normalizeHeader } from "@/lib/csv";
 import { importMatchesBatch, importBallsBatch } from "@/lib/csvImport";
 import { parseCricsheetJson, type ParsedCricsheetMatch } from "@/lib/cricsheetJson";
-import { parseCricsheetCsv } from "@/lib/cricsheetCsv";
+import { parseCricsheetCsv, parseCricsheetInfo } from "@/lib/cricsheetCsv";
+import { classifyAndPair, emptyImportSummary, type ImportSummary, type PairingResult } from "@/lib/filePairing";
 import {
   setUploadImporting,
   setUploadProgress,
@@ -17,14 +18,15 @@ interface UploadPageProps {
   onNavigate: (page: string, params?: Record<string, string>) => void;
 }
 
-interface ImportCounts {
-  matches: number;
-  innings: number;
-  balls: number;
-}
-
 const MAX_FILES_PER_SELECTION = 25000;
 const isMobile = typeof window !== "undefined" && /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+
+interface ProgressState {
+  phase: string;
+  total: number;
+  current: number;
+  committedRows: number;
+}
 
 export default function UploadPage({ onNavigate }: UploadPageProps) {
   const seenFilesRef = useRef<Set<string>>(new Set());
@@ -46,7 +48,11 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
     };
   }, []);
 
-  const streamImport = useCallback(async (f: File, matchId?: string): Promise<ImportCounts> => {
+  const setProgress = useCallback((state: ProgressState) => {
+    setUploadProgress({ total: state.total, current: state.current, phase: state.phase, committedRows: state.committedRows });
+  }, []);
+
+  const streamImport = useCallback(async (f: File, matchId: string, basePhase: string): Promise<{ matches: number; innings: number; balls: number }> => {
     let totalRows = Math.max(1, Math.floor(f.size / 80));
     let processed = 0;
     let committedRows = 0;
@@ -55,62 +61,59 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
     let ballsCount = 0;
     let determinedTotal = false;
 
-    setUploadProgress({ total: totalRows, current: 0, phase: `Streaming ${f.name} from disk...`, committedRows: 0 });
+    setProgress({ total: totalRows, current: 0, phase: `${basePhase} — reading ${f.name}...`, committedRows: 0 });
 
-    try {
-      for await (const batch of parseCSVStream(f)) {
-        if (batch.rows.length === 0 && batch.headers.length === 0) continue;
+    for await (const batch of parseCSVStream(f)) {
+      if (batch.rows.length === 0 && batch.headers.length === 0) continue;
 
-        if (!determinedTotal && batch.rows.length > 0) {
-          const approxRowsPerByte = batch.rows.length / Math.min(f.size, 1024 * 1024);
-          totalRows = Math.max(batch.rows.length, Math.floor(f.size * approxRowsPerByte));
-          determinedTotal = true;
-        }
-
-        const res = await importBallsBatch(batch.rows, (c) => {
-          setUploadProgress({
-            total: totalRows,
-            current: processed + batch.rows.length,
-            phase: `Saving ball-by-ball rows from ${f.name}...`,
-            committedRows: committedRows + c,
-          });
-        }, matchId);
-        processed += batch.rows.length;
-        matchesCount += res.matches;
-        inningsCount += res.innings;
-        ballsCount += res.balls;
-        committedRows += res.committed;
-
-        setUploadProgress({
-          total: totalRows,
-          current: processed,
-          phase: `Saving ball-by-ball rows from ${f.name}...`,
-          committedRows,
-        });
+      if (!determinedTotal && batch.rows.length > 0) {
+        const approxRowsPerByte = batch.rows.length / Math.min(f.size, 1024 * 1024);
+        totalRows = Math.max(batch.rows.length, Math.floor(f.size * approxRowsPerByte));
+        determinedTotal = true;
       }
 
-      setUploadProgress({ total: totalRows, current: processed, phase: `Saved ${f.name} to the database`, committedRows });
-      return { matches: matchesCount, innings: inningsCount, balls: ballsCount };
-    } finally {
-      setUploadProgress(null);
-    }
-  }, []);
+      const res = await importBallsBatch(batch.rows, (c) => {
+        setProgress({ total: totalRows, current: processed + batch.rows.length, phase: `${basePhase} — saving rows from ${f.name}...`, committedRows: committedRows + c });
+      }, matchId);
+      processed += batch.rows.length;
+      matchesCount += res.matches;
+      inningsCount += res.innings;
+      ballsCount += res.balls;
+      committedRows += res.committed;
 
-  const importCricsheetMatch = useCallback(async (fileName: string, parsed: ParsedCricsheetMatch, matchId: string): Promise<ImportCounts> => {
+      setProgress({ total: totalRows, current: processed, phase: `${basePhase} — saving rows from ${f.name}...`, committedRows });
+    }
+
+    return { matches: matchesCount, innings: inningsCount, balls: ballsCount };
+  }, [setProgress]);
+
+  const importCricsheetMatch = useCallback(async (fileName: string, parsed: ParsedCricsheetMatch, matchId: string): Promise<{ matches: number; innings: number; balls: number }> => {
     if (parsed.deliveries.length === 0) return { matches: 0, innings: 0, balls: 0 };
-    setUploadProgress({ total: parsed.deliveries.length, current: 0, phase: `Saving match details from ${fileName}...`, committedRows: 0 });
+    setProgress({ total: parsed.deliveries.length, current: 0, phase: `Saving match details from ${fileName}...`, committedRows: 0 });
     const matches = await importMatchesBatch([parsed.matchRow]);
 
     const res = await importBallsBatch(parsed.deliveries, (c) => {
-      setUploadProgress({
-        total: parsed.deliveries.length,
-        current: c,
-        phase: `Saving ball-by-ball rows from ${fileName}...`,
-        committedRows: c,
-      });
+      setProgress({ total: parsed.deliveries.length, current: c, phase: `Saving ball-by-ball rows from ${fileName}...`, committedRows: c });
     }, matchId);
 
     return { matches, innings: res.innings, balls: res.balls };
+  }, [setProgress]);
+
+  const importInfoFile = useCallback(async (file: File, matchId: string): Promise<number> => {
+    const text = await file.text();
+    const matchRow = parseCricsheetInfo(text, matchId);
+    if (!matchRow.team1 && !matchRow.team2) return 0;
+    const committed = await importMatchesBatch([matchRow]);
+    return committed;
+  }, []);
+
+  const importSummaryFile = useCallback(async (file: File): Promise<number> => {
+    const text = await file.text();
+    const { headers, rows } = parseCSV(text);
+    if (rows.length === 0) return 0;
+    const hasMatchId = headers.some((h) => normalizeHeader(h) === "matchid" || normalizeHeader(h) === "id");
+    if (!hasMatchId) return 0;
+    return importMatchesBatch(rows);
   }, []);
 
   const importFiles = useCallback(async (selectedFiles: File[]) => {
@@ -118,101 +121,191 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
     setUploadResult(null);
     setUploadImporting(true);
 
-    const totals: ImportCounts = { matches: 0, innings: 0, balls: 0 };
+    const summary = emptyImportSummary();
+    const warnings: string[] = [];
     const failedFiles: string[] = [];
-    const skippedFiles: string[] = [];
 
     try {
-      let completedFiles = 0;
-      const FILE_CONCURRENCY = 3;
+      // Phase 1: Classify and pair all files
+      setProgress({ total: selectedFiles.length, current: 0, phase: `Classifying ${selectedFiles.length.toLocaleString()} files...`, committedRows: 0 });
+      const pairing: PairingResult = await classifyAndPair(selectedFiles);
 
-      const processFile = async (selectedFile: File, fileNumber: number): Promise<void> => {
-        setUploadProgress({
-          total: selectedFiles.length,
-          current: completedFiles,
-          phase: `Processing file ${fileNumber} of ${selectedFiles.length}: ${selectedFile.name}`,
-          committedRows: 0,
-        });
+      summary.pairedGroups = pairing.pairs.filter((p) => p.info && p.balls).length;
+      summary.combinedFiles = pairing.combined.length;
+      summary.infoOnlyFiles = pairing.infoOnly.length;
+      summary.ballOnlyFiles = pairing.ballOnly.length;
+      summary.summaryFiles = pairing.summaryFiles.length;
+      summary.jsonFiles = pairing.jsonFiles.length;
 
-        const matchId = selectedFile.name.replace(/\.json$/i, "").replace(/_info\.csv$/i, "").replace(/\.csv$/i, "");
+      // Generate warnings for info-only and ball-only files
+      for (const { file, matchId } of pairing.infoOnly) {
+        warnings.push(`${file.name} mila, lekin ${matchId}.csv ball-by-ball file nahi mili.`);
+      }
+      for (const { file, matchId } of pairing.ballOnly) {
+        warnings.push(`${file.name} import ho gaya, lekin match information file nahi mili.`);
+      }
 
+      const totalUnits =
+        pairing.pairs.length +
+        pairing.combined.length +
+        pairing.jsonFiles.length +
+        pairing.infoOnly.length;
+      let completedUnits = 0;
+
+      const tickProgress = (phase: string, committed: number) => {
+        setProgress({ total: totalUnits, current: completedUnits, phase, committedRows: committed });
+      };
+
+      // Phase 2: Process paired groups (info + balls, or ball-only with stub, or summary-only)
+      const CONCURRENCY = 3;
+      const processPair = async (group: { matchId: string; info?: File; balls?: File; summary?: File }) => {
         try {
-          if (/\.json$/i.test(selectedFile.name)) {
-            const parsed = parseCricsheetJson(await selectedFile.text(), matchId);
-            const jsonCounts = await importCricsheetMatch(selectedFile.name, parsed, matchId);
-            totals.matches += jsonCounts.matches;
-            totals.innings += jsonCounts.innings;
-            totals.balls += jsonCounts.balls;
-            if (parsed.deliveries.length === 0) skippedFiles.push(selectedFile.name);
-            return;
+          if (group.info) {
+            await importInfoFile(group.info, group.matchId);
+            summary.importedMatches += 1;
           }
-
-          const headers = await readCSVHeaders(selectedFile);
-          if (headers.length === 0) {
-            throw new Error(`${selectedFile.name} is empty or does not contain a valid CSV header.`);
+          if (group.balls) {
+            if (group.info) {
+              // Paired: parse info, upsert match, then stream balls
+              const infoText = await group.info.text();
+              const matchRow = parseCricsheetInfo(infoText, group.matchId);
+              if (matchRow.team1 || matchRow.team2) {
+                await importMatchesBatch([matchRow]);
+              }
+            }
+            // Check if it's a cricsheet-format ball file (header starts with "version" or "ball")
+            const headers = await readCSVHeadersSafe(group.balls);
+            if (normalizeHeader(headers[0]) === "ball") {
+              // Cricsheet separate ball file — parse and import as cricsheet match
+              const parsed = parseCricsheetCsv(await group.balls.text(), group.matchId);
+              const counts = await importCricsheetMatch(group.balls.name, parsed, group.matchId);
+              summary.importedInnings += counts.innings;
+              summary.importedBalls += counts.balls;
+              if (counts.matches > 0) summary.importedMatches += counts.matches;
+            } else {
+              // Tabular ball file — stream import
+              const counts = await streamImport(group.balls, group.matchId, `Paired import ${group.matchId}`);
+              summary.importedMatches += counts.matches;
+              summary.importedInnings += counts.innings;
+              summary.importedBalls += counts.balls;
+            }
           }
-
-          if (normalizeHeader(headers[0]) === "version") {
-            const parsed = parseCricsheetCsv(await selectedFile.text(), matchId);
-            const combinedCounts = await importCricsheetMatch(selectedFile.name, parsed, matchId);
-            totals.matches += combinedCounts.matches;
-            totals.innings += combinedCounts.innings;
-            totals.balls += combinedCounts.balls;
-            if (parsed.deliveries.length === 0) skippedFiles.push(selectedFile.name);
-            return;
+          if (group.summary && !group.info && !group.balls) {
+            const committed = await importSummaryFile(group.summary);
+            summary.importedMatches += committed;
           }
-
-          if (/_info\.csv$/i.test(selectedFile.name)) {
-            skippedFiles.push(selectedFile.name);
-            return;
-          }
-
-          const detectedFormat = detectFormatFromHeaders(headers);
-          if (detectedFormat === "matches") {
-            skippedFiles.push(selectedFile.name);
-            return;
-          }
-          if (detectedFormat === "unknown" && !selectedFile.name.toLowerCase().endsWith(".csv")) {
-            throw new Error(`${selectedFile.name}: could not detect CSV format.`);
-          }
-
-          const counts = await streamImport(selectedFile, matchId);
-          totals.matches += counts.matches;
-          totals.innings += counts.innings;
-          totals.balls += counts.balls;
-        } catch (fileErr) {
-          console.error(`Import failed for ${selectedFile.name}`, fileErr);
-          failedFiles.push(selectedFile.name);
+        } catch (err) {
+          console.error(`Import failed for pair ${group.matchId}`, err);
+          summary.failedFiles += 1;
+          failedFiles.push(group.matchId);
         } finally {
-          completedFiles += 1;
-          setUploadProgress({
-            total: selectedFiles.length,
-            current: completedFiles,
-            phase: `Processed ${completedFiles.toLocaleString()} of ${selectedFiles.length.toLocaleString()} files`,
-            committedRows: totals.balls,
-          });
+          completedUnits += 1;
+          tickProgress(`Processed ${completedUnits}/${totalUnits} groups`, summary.importedBalls);
         }
       };
 
-      for (let i = 0; i < selectedFiles.length; i += FILE_CONCURRENCY) {
-        const group = selectedFiles.slice(i, i + FILE_CONCURRENCY);
-        await Promise.all(group.map((file, offset) => processFile(file, i + offset + 1)));
+      // Phase 3: Process combined cricsheet CSV files
+      const processCombined = async (file: File) => {
+        try {
+          const matchId = file.name.replace(/\.csv$/i, "");
+          const parsed = parseCricsheetCsv(await file.text(), matchId);
+          const counts = await importCricsheetMatch(file.name, parsed, matchId);
+          summary.importedMatches += counts.matches;
+          summary.importedInnings += counts.innings;
+          summary.importedBalls += counts.balls;
+          if (parsed.deliveries.length === 0) summary.skippedFiles += 1;
+        } catch (err) {
+          console.error(`Import failed for ${file.name}`, err);
+          summary.failedFiles += 1;
+          failedFiles.push(file.name);
+        } finally {
+          completedUnits += 1;
+          tickProgress(`Processed ${completedUnits}/${totalUnits} files`, summary.importedBalls);
+        }
+      };
+
+      // Phase 4: Process JSON files
+      const processJson = async (file: File) => {
+        try {
+          const matchId = file.name.replace(/\.json$/i, "");
+          const parsed = parseCricsheetJson(await file.text(), matchId);
+          const counts = await importCricsheetMatch(file.name, parsed, matchId);
+          summary.importedMatches += counts.matches;
+          summary.importedInnings += counts.innings;
+          summary.importedBalls += counts.balls;
+          if (parsed.deliveries.length === 0) summary.skippedFiles += 1;
+        } catch (err) {
+          console.error(`Import failed for ${file.name}`, err);
+          summary.failedFiles += 1;
+          failedFiles.push(file.name);
+        } finally {
+          completedUnits += 1;
+          tickProgress(`Processed ${completedUnits}/${totalUnits} files`, summary.importedBalls);
+        }
+      };
+
+      // Phase 5: Process info-only files (save match info without balls)
+      const processInfoOnly = async ({ file, matchId }: { file: File; matchId: string }) => {
+        try {
+          const committed = await importInfoFile(file, matchId);
+          if (committed > 0) summary.importedMatches += committed;
+          else summary.skippedFiles += 1;
+        } catch (err) {
+          console.error(`Import failed for ${file.name}`, err);
+          summary.failedFiles += 1;
+          failedFiles.push(file.name);
+        } finally {
+          completedUnits += 1;
+          tickProgress(`Processed ${completedUnits}/${totalUnits} files`, summary.importedBalls);
+        }
+      };
+
+      // Run all phases with controlled concurrency
+      const allTasks: Promise<void>[] = [];
+
+      for (let i = 0; i < pairing.pairs.length; i += CONCURRENCY) {
+        const batch = pairing.pairs.slice(i, i + CONCURRENCY);
+        allTasks.push(Promise.all(batch.map(processPair)).then(() => {}));
       }
 
-      if (totals.matches === 0 && totals.balls === 0) {
+      for (let i = 0; i < pairing.combined.length; i += CONCURRENCY) {
+        const batch = pairing.combined.slice(i, i + CONCURRENCY);
+        allTasks.push(Promise.all(batch.map(processCombined)).then(() => {}));
+      }
+
+      for (let i = 0; i < pairing.jsonFiles.length; i += CONCURRENCY) {
+        const batch = pairing.jsonFiles.slice(i, i + CONCURRENCY);
+        allTasks.push(Promise.all(batch.map(processJson)).then(() => {}));
+      }
+
+      for (let i = 0; i < pairing.infoOnly.length; i += CONCURRENCY) {
+        const batch = pairing.infoOnly.slice(i, i + CONCURRENCY);
+        allTasks.push(Promise.all(batch.map(processInfoOnly)).then(() => {}));
+      }
+
+      await Promise.all(allTasks);
+
+      if (summary.importedMatches === 0 && summary.importedBalls === 0) {
         throw new Error("No ball-by-ball data was found in the selected files, so nothing was saved.");
       }
-      const notices: string[] = [];
-      if (failedFiles.length > 0) {
-        const preview = failedFiles.slice(0, 5).join(", ");
-        const more = failedFiles.length > 5 ? ` and ${failedFiles.length - 5} more` : "";
-        notices.push(`${failedFiles.length} file(s) could not be imported: ${preview}${more}.`);
+
+      const allNotices: string[] = [...warnings];
+      if (summary.failedFiles > 0) {
+        allNotices.push(`${summary.failedFiles} file(s) could not be imported.`);
       }
-      if (skippedFiles.length > 0) {
-        notices.push(`${skippedFiles.length} file(s) were skipped because they have no ball-by-ball data.`);
+      if (summary.skippedFiles > 0) {
+        allNotices.push(`${summary.skippedFiles} file(s) were skipped because they have no ball-by-ball data.`);
       }
-      if (notices.length > 0) setUploadError(`${notices.join(" ")} All other files were saved.`);
-      setUploadResult(totals);
+      if (allNotices.length > 0) {
+        setUploadError(`${allNotices.join(" ")} All other files were saved.`);
+      }
+
+      setUploadResult({
+        ...summary,
+        matches: summary.importedMatches,
+        innings: summary.importedInnings,
+        balls: summary.importedBalls,
+      });
       setImportedFileCount((n) => n + selectedFiles.length);
     } catch (err) {
       console.error("CSV import failed", err);
@@ -221,7 +314,7 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
       setUploadImporting(false);
       setUploadProgress(null);
     }
-  }, [streamImport, importCricsheetMatch]);
+  }, [streamImport, importCricsheetMatch, importInfoFile, importSummaryFile, setProgress]);
 
   const addFiles = useCallback(async (newFiles: File[]) => {
     setUploadError(null);
@@ -313,7 +406,7 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
 
         <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Upload CSV Data</h1>
         <p className="mt-2 text-slate-400">
-          Pick your CSV files and they are imported automatically — match summaries, ball-by-ball, or a mix.
+          Pick your CSV or JSON files and they are imported automatically — paired info+balls, combined Cricsheet, JSON, or summary CSV.
         </p>
 
       {result ? (
@@ -323,28 +416,47 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
               <CheckCircle className="text-emerald-400" size={28} />
               <div>
                 <h2 className="text-lg font-semibold text-emerald-300">Import Complete</h2>
-                <p className="mt-1 text-sm text-emerald-200/70">{importedFileCount} CSV file{importedFileCount !== 1 ? "s" : ""} imported</p>
+                <p className="mt-1 text-sm text-emerald-200/70">{importedFileCount} file{importedFileCount !== 1 ? "s" : ""} processed</p>
               </div>
             </div>
             <span className="inline-flex w-fit items-center rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-300">
               Completed
             </span>
           </div>
-          <p className="mt-4 text-sm text-slate-300">All rows from the selected CSV files have been saved to the database.</p>
+
           <div className="mt-4 grid grid-cols-3 gap-4">
             <div className="rounded-lg bg-slate-900/60 p-4 text-center">
-              <p className="text-2xl font-bold">{result.matches}</p>
+              <p className="text-2xl font-bold">{result.importedMatches}</p>
               <p className="text-sm text-slate-400">Matches</p>
             </div>
             <div className="rounded-lg bg-slate-900/60 p-4 text-center">
-              <p className="text-2xl font-bold">{result.innings}</p>
+              <p className="text-2xl font-bold">{result.importedInnings}</p>
               <p className="text-sm text-slate-400">Innings</p>
             </div>
             <div className="rounded-lg bg-slate-900/60 p-4 text-center">
-              <p className="text-2xl font-bold">{result.balls.toLocaleString()}</p>
+              <p className="text-2xl font-bold">{result.importedBalls.toLocaleString()}</p>
               <p className="text-sm text-slate-400">Balls</p>
             </div>
           </div>
+
+          <div className="mt-4 grid grid-cols-2 gap-3 text-sm text-slate-400 sm:grid-cols-3">
+            <div className="rounded-lg bg-slate-900/40 px-3 py-2">Paired groups: <span className="font-semibold text-slate-200">{result.pairedGroups}</span></div>
+            <div className="rounded-lg bg-slate-900/40 px-3 py-2">Combined files: <span className="font-semibold text-slate-200">{result.combinedFiles}</span></div>
+            <div className="rounded-lg bg-slate-900/40 px-3 py-2">JSON files: <span className="font-semibold text-slate-200">{result.jsonFiles}</span></div>
+            <div className="rounded-lg bg-slate-900/40 px-3 py-2">Info-only: <span className="font-semibold text-slate-200">{result.infoOnlyFiles}</span></div>
+            <div className="rounded-lg bg-slate-900/40 px-3 py-2">Ball-only: <span className="font-semibold text-slate-200">{result.ballOnlyFiles}</span></div>
+            <div className="rounded-lg bg-slate-900/40 px-3 py-2">Summary: <span className="font-semibold text-slate-200">{result.summaryFiles}</span></div>
+            {result.failedFiles > 0 && <div className="rounded-lg bg-red-500/10 px-3 py-2 text-red-300">Failed: {result.failedFiles}</div>}
+            {result.skippedFiles > 0 && <div className="rounded-lg bg-amber-500/10 px-3 py-2 text-amber-300">Skipped: {result.skippedFiles}</div>}
+          </div>
+
+          {error && (
+            <div className="mt-4 flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4">
+              <AlertTriangle className="mt-0.5 shrink-0 text-amber-400" size={20} />
+              <p className="text-sm text-amber-300">{error}</p>
+            </div>
+          )}
+
           <div className="mt-6 flex gap-3">
             <button
               onClick={() => onNavigate("matches")}
@@ -369,7 +481,7 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
               {progress.total > 1 && (
                 <>
                   <p className="mt-1 text-sm text-slate-500">
-                    {progress.current.toLocaleString()} / {progress.total.toLocaleString()} rows read
+                    {progress.current.toLocaleString()} / {progress.total.toLocaleString()} processed
                   </p>
                   <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-800">
                     <div
@@ -385,9 +497,6 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
                   <span className="font-bold">{progress.committedRows.toLocaleString()}</span> rows saved to database
                 </span>
               </div>
-              <p className="mt-4 text-xs text-slate-500">
-                Streaming in chunks — the committed count shows rows actually written to the database so far.
-              </p>
             </>
           )}
         </div>
@@ -457,9 +566,50 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
               <p className="text-sm text-red-300">{error}</p>
             </div>
           )}
+
+          <div className="mt-6 rounded-xl border border-slate-800 bg-slate-900/40 p-5">
+            <div className="flex items-center gap-2 text-slate-300">
+              <Info size={16} className="text-blue-400" />
+              <h3 className="text-sm font-semibold">Supported file formats</h3>
+            </div>
+            <ul className="mt-3 space-y-2 text-sm text-slate-400">
+              <li><span className="text-slate-200 font-medium">Paired CSV</span> — <code className="text-blue-300">63963_info.csv</code> + <code className="text-blue-300">63963.csv</code> are automatically paired into one match</li>
+              <li><span className="text-slate-200 font-medium">Combined Cricsheet CSV</span> — info and ball rows in a single file</li>
+              <li><span className="text-slate-200 font-medium">Cricsheet JSON</span> — <code className="text-blue-300">.json</code> match files</li>
+              <li><span className="text-slate-200 font-medium">Summary CSV</span> — match summary rows are upserted into the matches table</li>
+            </ul>
+          </div>
         </>
       )}
       </div>
     </div>
   );
+}
+
+async function readCSVHeadersSafe(file: File): Promise<string[]> {
+  const slice = file.slice(0, Math.min(65536, file.size));
+  const text = await slice.text();
+  const cleaned = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  const firstLine = cleaned.split(/\r?\n/)[0] ?? "";
+  if (firstLine.length === 0) return [];
+  const delimiter = (function detectDelimiter(line: string) {
+    const candidates = [",", "\t", ";", "|"];
+    return candidates.map((d) => ({ d, count: line.split(d).length })).sort((a, b) => b.count - a.count)[0].d;
+  })(firstLine);
+  return (function parseCSVLine(line: string, delimiter: string): string[] {
+    const result: string[] = [];
+    let current = "";
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      if (char === '"') {
+        if (inQuotes && line[i + 1] === '"') { current += '"'; i++; }
+        else { inQuotes = !inQuotes; }
+      } else if (char === delimiter && !inQuotes) {
+        result.push(current.trim()); current = "";
+      } else { current += char; }
+    }
+    result.push(current.trim());
+    return result;
+  })(firstLine, delimiter);
 }

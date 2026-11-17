@@ -11,6 +11,17 @@ export interface ImportResult {
   matches: number;
   innings: number;
   balls: number;
+  pairedGroups?: number;
+  combinedFiles?: number;
+  infoOnlyFiles?: number;
+  ballOnlyFiles?: number;
+  summaryFiles?: number;
+  jsonFiles?: number;
+  importedMatches?: number;
+  importedInnings?: number;
+  importedBalls?: number;
+  failedFiles?: number;
+  skippedFiles?: number;
 }
 
 interface UploadState {

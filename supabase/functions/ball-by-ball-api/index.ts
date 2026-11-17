@@ -7,8 +7,6 @@ const corsHeaders = {
 };
 
 const formats = new Set(["T20", "ODI", "Test", "T10", "First Class", "List A", "Unknown"]);
-const playerRoles = ["batter", "bowler", "non_striker", "player_out", "fielder"] as const;
-type PlayerRole = (typeof playerRoles)[number];
 
 type AdminClient = ReturnType<typeof createClient>;
 type MatchFilters = {
@@ -55,24 +53,6 @@ async function validateApiKey(req: Request, supabase: AdminClient): Promise<bool
   return true;
 }
 
-async function fetchAllRows<T>(
-  query: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
-): Promise<T[]> {
-  const pageSize = 1000;
-  const rows: T[] = [];
-  for (let from = 0; ; from += pageSize) {
-    const { data, error } = await query(from, from + pageSize - 1);
-    if (error) throw new Error(error.message);
-    const page = data ?? [];
-    rows.push(...page);
-    if (page.length < pageSize) return rows;
-  }
-}
-
-function escapeLike(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
-}
-
 function normalizeFormat(value: string | null): string | null {
   if (!value) return null;
   const match = [...formats].find((format) => format.toLowerCase() === value.trim().toLowerCase());
@@ -104,175 +84,171 @@ function parseMatchFilters(url: URL): MatchFilters | { error: string } {
   };
 }
 
-function applyDatabaseMatchFilters(query: any, filters: MatchFilters): any {
+function filtersObject(playerName: string | null, filters: MatchFilters): Record<string, unknown> {
+  return {
+    player: playerName,
+    match_id: filters.matchId,
+    format: filters.format,
+    season: filters.season,
+    team: filters.team,
+    date_from: filters.dateFrom,
+    date_to: filters.dateTo,
+  };
+}
+
+function applyMatchFilters(query: any, filters: MatchFilters): any {
   let next = query;
   if (filters.matchId) next = next.eq("match_id", filters.matchId);
   if (filters.format) next = next.eq("match_format", filters.format);
   if (filters.season) next = next.eq("season", filters.season);
+  if (filters.team) {
+    const team = filters.team.toLowerCase();
+    next = next.or(`team1.ilike.%${team}%,team2.ilike.%${team}%`);
+  }
   if (filters.dateFrom) next = next.gte("date", filters.dateFrom);
   if (filters.dateTo) next = next.lte("date", filters.dateTo);
   return next;
 }
 
-async function fetchMatches(supabase: AdminClient, filters: MatchFilters): Promise<any[]> {
-  const rows = await fetchAllRows((from, to) => {
-    let query = supabase
-      .from("matches")
-      .select("id, match_id, match_format, season, city, date, team1, team2, toss_winner, toss_decision, result, result_margin, player_of_match, venue, umpire1, umpire2, created_at")
-      .order("date", { ascending: false, nullsFirst: false })
-      .range(from, to);
-    query = applyDatabaseMatchFilters(query, filters);
-    return query;
-  });
+const MATCH_COLUMNS = "id, match_id, match_format, season, city, date, team1, team2, toss_winner, toss_decision, result, result_margin, player_of_match, venue, umpire1, umpire2, created_at";
 
-  const teamNeedle = filters.team?.toLowerCase();
-  const searchNeedle = filters.search?.toLowerCase();
-  return rows.filter((match) => {
-    if (teamNeedle && ![match.team1, match.team2].some((team: string | null) => team?.toLowerCase().includes(teamNeedle))) return false;
-    if (searchNeedle && ![match.match_id, match.team1, match.team2, match.venue, match.city, match.player_of_match]
-      .some((value: string | null) => value?.toLowerCase().includes(searchNeedle))) return false;
-    return true;
-  });
-}
+async function handleMatches(supabase: AdminClient, url: URL): Promise<Response> {
+  const parsed = parseMatchFilters(url);
+  if ("error" in parsed) return errorResponse(parsed.error, 400);
 
-function filterMatchIds(matches: any[]): string[] {
-  return matches.map((match) => match.id);
-}
+  const page = Number.parseInt(url.searchParams.get("page") ?? "1", 10);
+  const limit = Number.parseInt(url.searchParams.get("limit") ?? "100", 10);
+  if (!Number.isInteger(page) || page < 1) return errorResponse("page must be a positive integer", 400);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) return errorResponse("limit must be between 1 and 500", 400);
 
-async function fetchPlayerRoleRows(
-  supabase: AdminClient,
-  playerName: string,
-  role: PlayerRole,
-  select: string,
-  matchIds: string[],
-): Promise<any[]> {
-  const pattern = role === "fielder" ? `%${escapeLike(playerName)}%` : escapeLike(playerName);
-  const idChunks = matchIds.length === 0 ? [null] : Array.from({ length: Math.ceil(matchIds.length / 500) }, (_, index) => matchIds.slice(index * 500, index * 500 + 500));
-  const rows: any[] = [];
+  const from = (page - 1) * limit;
+  const to = from + limit - 1;
 
-  for (const ids of idChunks) {
-    const page = await fetchAllRows((from, to) => {
-      let query = supabase.from("ball_by_balls").select(select).ilike(role, pattern).order("id").range(from, to);
-      if (ids) query = query.in("match_id", ids);
-      return query;
-    });
-    rows.push(...page);
-  }
-  return rows;
-}
+  let query = supabase
+    .from("matches")
+    .select(MATCH_COLUMNS, { count: "exact" })
+    .order("date", { ascending: false, nullsFirst: false })
+    .range(from, to);
+  query = applyMatchFilters(query, parsed);
 
-async function fetchPlayerParticipation(supabase: AdminClient, playerName: string, matchIds: string[]): Promise<Set<string>> {
-  const roleRows = await Promise.all(playerRoles.map((role) => fetchPlayerRoleRows(supabase, playerName, role, "match_id", matchIds)));
-  const ids = new Set<string>();
-  for (const rows of roleRows) for (const row of rows) ids.add(row.match_id);
-  return ids;
-}
-
-function emptyStats(player: string, filters: MatchFilters): unknown {
-  return {
-    filters: {
-      player,
-      match_id: filters.matchId,
-      format: filters.format,
-      season: filters.season,
-      team: filters.team,
-      date_from: filters.dateFrom,
-      date_to: filters.dateTo,
-    },
-    stats: {
-      player,
-      matches: 0,
-      batting: { runs: 0, balls: 0, outs: 0, six_count: 0, batting_position: null, average: null, strike_rate: null },
-      bowling: { runs_conceded: 0, balls: 0, wickets: 0, economy: null, average: null },
-    },
-  };
-}
-
-async function getBattingPosition(supabase: AdminClient, playerName: string, matches: any[], filtered: boolean): Promise<number | null> {
-  if (!filtered) {
-    const { data, error } = await supabase.rpc("player_batting_positions", { p_name: playerName });
-    if (error) throw new Error(error.message);
-    const positions = (data ?? []).map((row: { batting_position: number }) => row.batting_position).filter(Number.isFinite);
-    return positions.length ? +(positions.reduce((sum: number, value: number) => sum + value, 0) / positions.length).toFixed(2) : null;
+  const search = parsed.search?.toLowerCase();
+  if (search) {
+    query = query.or(`match_id.ilike.%${search}%,team1.ilike.%${search}%,team2.ilike.%${search}%,venue.ilike.%${search}%,city.ilike.%${search}%`);
   }
 
-  const matchIds = filterMatchIds(matches);
-  if (!matchIds.length) return null;
-  const rows = await fetchPlayerRoleRows(supabase, playerName, "batter", "match_id, innings_id", matchIds);
-  if (!rows.length) return null;
-  return null;
+  const { data, error, count } = await query;
+  if (error) throw new Error(error.message);
+
+  const total = count ?? 0;
+  const totalPages = Math.ceil(total / limit) || 0;
+  return json({
+    matches: data ?? [],
+    pagination: { page, limit, total, total_pages: totalPages, has_next: page < totalPages },
+  });
+}
+
+async function handleMatchInnings(supabase: AdminClient, matchId: string): Promise<Response> {
+  const { data: match, error: matchError } = await supabase
+    .from("matches")
+    .select("id, match_id, match_format, season, city, date, team1, team2, toss_winner, toss_decision, result, result_margin, player_of_match, venue, umpire1, umpire2")
+    .eq("match_id", matchId)
+    .maybeSingle();
+  if (matchError) throw new Error(matchError.message);
+  if (!match) return errorResponse("Match not found", 404);
+
+  const { data: innings, error } = await supabase
+    .from("innings")
+    .select("innings_no, batting_team, bowling_team, total_runs, total_wickets, total_overs")
+    .eq("match_id", match.id)
+    .order("innings_no");
+  if (error) throw new Error(error.message);
+  return json({ match, innings: innings ?? [] });
+}
+
+async function handleInningsBalls(supabase: AdminClient, matchId: string, inningsNo: number): Promise<Response> {
+  const { data: match } = await supabase.from("matches").select("id").eq("match_id", matchId).maybeSingle();
+  if (!match) return errorResponse("Match not found", 404);
+  const { data: inning } = await supabase
+    .from("innings")
+    .select("id")
+    .eq("match_id", match.id)
+    .eq("innings_no", inningsNo)
+    .maybeSingle();
+  if (!inning) return errorResponse("Innings not found", 404);
+  const { data: balls, error } = await supabase
+    .from("ball_by_balls")
+    .select("*")
+    .eq("innings_id", inning.id)
+    .order("over")
+    .order("ball");
+  if (error) throw new Error(error.message);
+  return json({ balls: balls ?? [] });
+}
+
+async function handleMatchBalls(supabase: AdminClient, matchId: string): Promise<Response> {
+  const { data: match } = await supabase.from("matches").select("id").eq("match_id", matchId).maybeSingle();
+  if (!match) return errorResponse("Match not found", 404);
+  const { data: balls, error } = await supabase
+    .from("ball_by_balls")
+    .select("*")
+    .eq("match_id", match.id)
+    .order("over")
+    .order("ball");
+  if (error) throw new Error(error.message);
+  return json({ balls: balls ?? [] });
 }
 
 async function handlePlayerStats(supabase: AdminClient, playerName: string, url: URL): Promise<Response> {
   const parsed = parseMatchFilters(url);
   if ("error" in parsed) return errorResponse(parsed.error, 400);
-  const filters = parsed;
-  const matches = await fetchMatches(supabase, filters);
-  const matchIds = filterMatchIds(matches);
-  const participation = await fetchPlayerParticipation(supabase, playerName, matchIds);
-  if (!participation.size) return json(emptyStats(playerName, filters));
 
-  const [batting, bowling] = await Promise.all([
-    fetchPlayerRoleRows(supabase, playerName, "batter", "match_id, runs_batter, is_wicket, wicket_type, extras_type", matchIds),
-    fetchPlayerRoleRows(supabase, playerName, "bowler", "match_id, runs_total, is_wicket, extras_type, wicket_type", matchIds),
-  ]);
-
-  const runs = batting.reduce((sum, row) => sum + (row.runs_batter || 0), 0);
-  const legalBatting = batting.filter((row) => !["wide", "noball"].includes(String(row.extras_type ?? "").toLowerCase().replace(/[ _-]/g, "")));
-  const outs = batting.filter((row) => row.is_wicket && row.wicket_type && !["run out", "retired hurt", "obstructing the field"].includes(String(row.wicket_type).toLowerCase())).length;
-  const sixCount = batting.filter((row) => row.runs_batter === 6).length;
-  const runsConceded = bowling.reduce((sum, row) => sum + (row.runs_total || 0), 0);
-  const legalBowling = bowling.filter((row) => !["wide", "noball"].includes(String(row.extras_type ?? "").toLowerCase().replace(/[ _-]/g, "")));
-  const wickets = bowling.filter((row) => row.is_wicket && row.wicket_type && !["run out", "retired hurt", "obstructing the field"].includes(String(row.wicket_type).toLowerCase())).length;
-  const battingPosition = await getBattingPosition(supabase, playerName, matches, Boolean(filters.matchId || filters.format || filters.season || filters.team || filters.dateFrom || filters.dateTo));
-
-  return json({
-    filters: { player: playerName, match_id: filters.matchId, format: filters.format, season: filters.season, team: filters.team, date_from: filters.dateFrom, date_to: filters.dateTo },
-    stats: {
-      player: playerName,
-      matches: participation.size,
-      batting: {
-        runs,
-        balls: legalBatting.length,
-        outs,
-        six_count: sixCount,
-        batting_position: battingPosition,
-        average: outs > 0 ? +(runs / outs).toFixed(2) : null,
-        strike_rate: legalBatting.length > 0 ? +((runs / legalBatting.length) * 100).toFixed(2) : null,
-      },
-      bowling: {
-        runs_conceded: runsConceded,
-        balls: legalBowling.length,
-        wickets,
-        economy: legalBowling.length > 0 ? +((runsConceded / legalBowling.length) * 6).toFixed(2) : null,
-        average: wickets > 0 ? +(runsConceded / wickets).toFixed(2) : null,
-      },
-    },
+  const { data, error } = await supabase.rpc("player_career_stats", {
+    p_name: playerName,
+    p_match_id: parsed.matchId,
+    p_format: parsed.format,
+    p_season: parsed.season,
+    p_team: parsed.team,
+    p_date_from: parsed.dateFrom,
+    p_date_to: parsed.dateTo,
   });
+  if (error) throw new Error(error.message);
+
+  const stats = data ?? {};
+  return json({ filters: filtersObject(playerName, parsed), stats });
 }
 
 async function handlePlayerMatches(supabase: AdminClient, playerName: string, url: URL): Promise<Response> {
   const parsed = parseMatchFilters(url);
   if ("error" in parsed) return errorResponse(parsed.error, 400);
-  const filters = parsed;
-  const matches = await fetchMatches(supabase, filters);
-  const participation = await fetchPlayerParticipation(supabase, playerName, filterMatchIds(matches));
-  return json({
-    filters: { player: playerName, match_id: filters.matchId, format: filters.format, season: filters.season, team: filters.team, date_from: filters.dateFrom, date_to: filters.dateTo },
-    matches: matches.filter((match) => participation.has(match.id)),
+
+  const { data, error } = await supabase.rpc("player_matches", {
+    p_name: playerName,
+    p_match_id: parsed.matchId,
+    p_format: parsed.format,
+    p_season: parsed.season,
+    p_team: parsed.team,
+    p_date_from: parsed.dateFrom,
+    p_date_to: parsed.dateTo,
   });
+  if (error) throw new Error(error.message);
+  return json({ filters: filtersObject(playerName, parsed), matches: data ?? [] });
 }
 
-async function handlePlayerMatchBalls(supabase: AdminClient, playerName: string, matchId: string): Promise<Response> {
-  const { data: match, error: matchError } = await supabase.from("matches").select("id").eq("match_id", matchId).maybeSingle();
-  if (matchError) throw new Error(matchError.message);
+async function handlePlayerMatchBalls(supabase: AdminClient, playerName: string, matchId: string, url: URL): Promise<Response> {
+  const { data: match } = await supabase.from("matches").select("id").eq("match_id", matchId).maybeSingle();
   if (!match) return errorResponse("Match not found", 404);
 
-  const roleRows = await Promise.all(playerRoles.map((role) => fetchPlayerRoleRows(supabase, playerName, role, "*", [match.id])));
-  const byId = new Map<string, any>();
-  for (const rows of roleRows) for (const row of rows) byId.set(row.id, row);
-  const balls = [...byId.values()].sort((a, b) => a.over - b.over || a.ball - b.ball);
-  return json({ balls });
+  const limit = Math.min(Math.max(Number.parseInt(url.searchParams.get("limit") ?? "500", 10) || 500, 1), 2000);
+  const offset = Math.max(Number.parseInt(url.searchParams.get("offset") ?? "0", 10) || 0, 0);
+
+  const { data: balls, error } = await supabase.rpc("player_match_balls", {
+    p_name: playerName,
+    p_match_id: matchId,
+    p_limit: limit,
+    p_offset: offset,
+  });
+  if (error) throw new Error(error.message);
+  return json({ balls: balls ?? [] });
 }
 
 Deno.serve(async (req: Request) => {
@@ -289,60 +265,37 @@ Deno.serve(async (req: Request) => {
     const url = new URL(req.url);
     const path = url.pathname.replace(/^.*\/ball-by-ball-api/, "");
     const segments = path.split("/").filter(Boolean);
+    const playerName = segments[0] === "players" ? decodeURIComponent(segments[1]) : null;
 
+    // /matches
     if (segments.length === 1 && segments[0] === "matches") {
-      const parsed = parseMatchFilters(url);
-      if ("error" in parsed) return errorResponse(parsed.error, 400);
-      const page = Number.parseInt(url.searchParams.get("page") ?? "1", 10);
-      const limit = Number.parseInt(url.searchParams.get("limit") ?? "100", 10);
-      if (!Number.isInteger(page) || page < 1) return errorResponse("page must be a positive integer", 400);
-      if (!Number.isInteger(limit) || limit < 1 || limit > 500) return errorResponse("limit must be between 1 and 500", 400);
-      const matches = await fetchMatches(supabase, parsed);
-      const start = (page - 1) * limit;
-      const pageRows = matches.slice(start, start + limit);
-      const totalPages = Math.ceil(matches.length / limit);
-      return json({ matches: pageRows, pagination: { page, limit, total: matches.length, total_pages: totalPages, has_next: page < totalPages } });
+      return handleMatches(supabase, url);
     }
-
+    // /matches/:id/innings
     if (segments.length === 3 && segments[0] === "matches" && segments[2] === "innings") {
-      const { data: match, error: matchError } = await supabase.from("matches").select("id, match_id, match_format, season, city, date, team1, team2, toss_winner, toss_decision, result, result_margin, player_of_match, venue, umpire1, umpire2").eq("match_id", segments[1]).maybeSingle();
-      if (matchError) throw new Error(matchError.message);
-      if (!match) return errorResponse("Match not found", 404);
-      const { data: innings, error } = await supabase.from("innings").select("innings_no, batting_team, bowling_team, total_runs, total_wickets, total_overs").eq("match_id", match.id).order("innings_no");
-      if (error) throw new Error(error.message);
-      return json({ match, innings: innings ?? [] });
+      return handleMatchInnings(supabase, segments[1]);
     }
-
+    // /matches/:id/innings/:no/balls
     if (segments.length === 5 && segments[0] === "matches" && segments[2] === "innings" && segments[4] === "balls") {
       const inningsNo = Number.parseInt(segments[3], 10);
       if (!Number.isInteger(inningsNo) || inningsNo < 1) return errorResponse("Invalid innings number", 400);
-      const { data: match } = await supabase.from("matches").select("id").eq("match_id", segments[1]).maybeSingle();
-      if (!match) return errorResponse("Match not found", 404);
-      const { data: inning } = await supabase.from("innings").select("id").eq("match_id", match.id).eq("innings_no", inningsNo).maybeSingle();
-      if (!inning) return errorResponse("Innings not found", 404);
-      const { data: balls, error } = await supabase.from("ball_by_balls").select("*").eq("innings_id", inning.id).order("over").order("ball");
-      if (error) throw new Error(error.message);
-      return json({ balls: balls ?? [] });
+      return handleInningsBalls(supabase, segments[1], inningsNo);
     }
-
+    // /matches/:id/balls
     if (segments.length === 3 && segments[0] === "matches" && segments[2] === "balls") {
-      const { data: match } = await supabase.from("matches").select("id").eq("match_id", segments[1]).maybeSingle();
-      if (!match) return errorResponse("Match not found", 404);
-      const { data: balls, error } = await supabase.from("ball_by_balls").select("*").eq("match_id", match.id).order("over").order("ball");
-      if (error) throw new Error(error.message);
-      return json({ balls: balls ?? [] });
+      return handleMatchBalls(supabase, segments[1]);
     }
-
+    // /players/:name/stats
     if (segments.length === 3 && segments[0] === "players" && segments[2] === "stats") {
-      return handlePlayerStats(supabase, decodeURIComponent(segments[1]), url);
+      return handlePlayerStats(supabase, playerName!, url);
     }
-
+    // /players/:name/matches
     if (segments.length === 3 && segments[0] === "players" && segments[2] === "matches") {
-      return handlePlayerMatches(supabase, decodeURIComponent(segments[1]), url);
+      return handlePlayerMatches(supabase, playerName!, url);
     }
-
+    // /players/:name/matches/:matchId/balls
     if (segments.length === 5 && segments[0] === "players" && segments[2] === "matches" && segments[4] === "balls") {
-      return handlePlayerMatchBalls(supabase, decodeURIComponent(segments[1]), segments[3]);
+      return handlePlayerMatchBalls(supabase, playerName!, segments[3], url);
     }
 
     return errorResponse("Not found", 404);
