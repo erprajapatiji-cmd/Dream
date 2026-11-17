@@ -96,7 +96,16 @@ function filtersObject(playerName: string | null, filters: MatchFilters): Record
   };
 }
 
-function applyMatchFilters(query: any, filters: MatchFilters): any {
+type SupabaseQuery = {
+  eq: (column: string, value: string) => SupabaseQuery;
+  or: (filter: string) => SupabaseQuery;
+  gte: (column: string, value: string) => SupabaseQuery;
+  lte: (column: string, value: string) => SupabaseQuery;
+  order: (column: string, opts?: { ascending?: boolean; nullsFirst?: boolean }) => SupabaseQuery;
+  range: (from: number, to: number) => SupabaseQuery;
+};
+
+function applyMatchFilters(query: SupabaseQuery, filters: MatchFilters): SupabaseQuery {
   let next = query;
   if (filters.matchId) next = next.eq("match_id", filters.matchId);
   if (filters.format) next = next.eq("match_format", filters.format);
@@ -128,7 +137,7 @@ async function handleMatches(supabase: AdminClient, url: URL): Promise<Response>
     .from("matches")
     .select(MATCH_COLUMNS, { count: "exact" })
     .order("date", { ascending: false, nullsFirst: false })
-    .range(from, to);
+    .range(from, to) as unknown as SupabaseQuery & { or: (filter: string) => SupabaseQuery & { data: unknown[]; error: { message: string } | null; count: number | null } };
   query = applyMatchFilters(query, parsed);
 
   const search = parsed.search?.toLowerCase();

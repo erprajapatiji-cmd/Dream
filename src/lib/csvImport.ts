@@ -53,8 +53,7 @@ function optionalField(row: ParsedMatchRow, ...names: string[]): string | null {
   return value;
 }
 
-const MATCH_FORMATS = ["T20", "ODI", "Test", "T10", "First Class", "List A", "Unknown"] as const;
-export type MatchFormat = (typeof MATCH_FORMATS)[number];
+export type MatchFormat = "T20" | "ODI" | "Test" | "T10" | "First Class" | "List A" | "Unknown";
 
 export function normalizeMatchFormat(value: string): MatchFormat {
   const normalized = value.trim().toLowerCase().replace(/[._-]+/g, " ").replace(/\s+/g, " ");

@@ -4,7 +4,7 @@ import { parseCSVStream, parseCSV, normalizeHeader } from "@/lib/csv";
 import { importMatchesBatch, importBallsBatch } from "@/lib/csvImport";
 import { parseCricsheetJson, type ParsedCricsheetMatch } from "@/lib/cricsheetJson";
 import { parseCricsheetCsv, parseCricsheetInfo } from "@/lib/cricsheetCsv";
-import { classifyAndPair, emptyImportSummary, type ImportSummary, type PairingResult } from "@/lib/filePairing";
+import { classifyAndPair, emptyImportSummary, type PairingResult } from "@/lib/filePairing";
 import {
   setUploadImporting,
   setUploadProgress,
@@ -142,7 +142,7 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
         warnings.push(`${file.name} mila, lekin ${matchId}.csv ball-by-ball file nahi mili.`);
       }
       for (const { file, matchId } of pairing.ballOnly) {
-        warnings.push(`${file.name} import ho gaya, lekin match information file nahi mili.`);
+        warnings.push(`${file.name} import ho gaya, lekin ${matchId}_info.csv match information file nahi mili.`);
       }
 
       const totalUnits =
@@ -158,7 +158,7 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
 
       // Phase 2: Process paired groups (info + balls, or ball-only with stub, or summary-only)
       const CONCURRENCY = 3;
-      const processPair = async (group: { matchId: string; info?: File; balls?: File; summary?: File }) => {
+      const processPair = async (group: { matchId: string; info?: File; balls?: File; summary?: File; combined?: File; json?: File }) => {
         try {
           if (group.info) {
             await importInfoFile(group.info, group.matchId);
@@ -434,7 +434,7 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
               <p className="text-sm text-slate-400">Innings</p>
             </div>
             <div className="rounded-lg bg-slate-900/60 p-4 text-center">
-              <p className="text-2xl font-bold">{result.importedBalls.toLocaleString()}</p>
+              <p className="text-2xl font-bold">{(result.importedBalls ?? 0).toLocaleString()}</p>
               <p className="text-sm text-slate-400">Balls</p>
             </div>
           </div>
@@ -446,8 +446,8 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
             <div className="rounded-lg bg-slate-900/40 px-3 py-2">Info-only: <span className="font-semibold text-slate-200">{result.infoOnlyFiles}</span></div>
             <div className="rounded-lg bg-slate-900/40 px-3 py-2">Ball-only: <span className="font-semibold text-slate-200">{result.ballOnlyFiles}</span></div>
             <div className="rounded-lg bg-slate-900/40 px-3 py-2">Summary: <span className="font-semibold text-slate-200">{result.summaryFiles}</span></div>
-            {result.failedFiles > 0 && <div className="rounded-lg bg-red-500/10 px-3 py-2 text-red-300">Failed: {result.failedFiles}</div>}
-            {result.skippedFiles > 0 && <div className="rounded-lg bg-amber-500/10 px-3 py-2 text-amber-300">Skipped: {result.skippedFiles}</div>}
+            {(result.failedFiles ?? 0) > 0 && <div className="rounded-lg bg-red-500/10 px-3 py-2 text-red-300">Failed: {result.failedFiles}</div>}
+            {(result.skippedFiles ?? 0) > 0 && <div className="rounded-lg bg-amber-500/10 px-3 py-2 text-amber-300">Skipped: {result.skippedFiles}</div>}
           </div>
 
           {error && (
