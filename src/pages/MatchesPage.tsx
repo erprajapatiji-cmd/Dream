@@ -53,19 +53,14 @@ export default function MatchesPage({ onNavigate, backgroundUpload }: MatchesPag
 
   const seasons = [...new Set(matches.map((m) => m.season).filter((season): season is string => Boolean(season)))].sort().reverse();
 
-  const isPlaceholder = (team: string | null | undefined): boolean => {
-    const t = (team ?? "").trim().toLowerCase();
-    return t === "" || ["tbd", "unknown", "na", "n/a", "null", "undefined"].includes(t);
-  };
-
   const filtered = matches.filter((m) => {
-    if (isPlaceholder(m.team1) && isPlaceholder(m.team2)) return false;
     const matchesSearch = !search ||
       m.team1?.toLowerCase().includes(search.toLowerCase()) ||
       m.team2?.toLowerCase().includes(search.toLowerCase()) ||
       m.venue?.toLowerCase().includes(search.toLowerCase()) ||
       m.city?.toLowerCase().includes(search.toLowerCase()) ||
-      m.player_of_match?.toLowerCase().includes(search.toLowerCase());
+      m.player_of_match?.toLowerCase().includes(search.toLowerCase()) ||
+      m.match_id?.toLowerCase().includes(search.toLowerCase());
     const matchesSeason = !seasonFilter || m.season === seasonFilter;
     return matchesSearch && matchesSeason;
   });

@@ -64,6 +64,7 @@ export function parseCricsheetJson(raw: string, matchId: string): ParsedCricshee
     const inningObject = asObject(inning);
     if (!inningObject) return;
 
+    const inningTeam = str(inningObject.team);
     const overDeliveries = asArray(inningObject.overs).flatMap((over) => asArray(asObject(over)?.deliveries));
     for (const entry of overDeliveries) {
       const delivery = asObject(entry);
@@ -91,6 +92,7 @@ export function parseCricsheetJson(raw: string, matchId: string): ParsedCricshee
         wicket_type: str(wicket?.kind),
         player_out: str(wicket?.player_out),
         fielder: fielders,
+        batting_team: inningTeam,
       });
     }
   });

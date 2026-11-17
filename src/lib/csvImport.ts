@@ -41,6 +41,8 @@ interface BallPayload {
   wicket_type: string | null;
   player_out: string | null;
   fielder: string | null;
+  batting_team: string | null;
+  bowling_team: string | null;
 }
 
 function uniqueMatchId(row: ParsedMatchRow): string {
@@ -150,6 +152,8 @@ function toBallPayload(row: ParsedMatchRow, matchIdOverride?: string): BallPaylo
     wicket_type: wicketType || null,
     player_out: playerOut || null,
     fielder: getField(row, "fielder", "Fielder", "FieldersInvolved", "fieldersinvolved", "fielder_1") || null,
+    batting_team: getField(row, "batting_team", "BattingTeam", "battingteam", "bat_team", "batteam") || null,
+    bowling_team: getField(row, "bowling_team", "BowlingTeam", "bowlingteam", "bowl_team", "bowlteam") || null,
   };
 }
 

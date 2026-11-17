@@ -44,6 +44,8 @@ interface BallRecord {
   wicket_type: string | null;
   player_out: string | null;
   fielder: string | null;
+  batting_team?: string | null;
+  bowling_team?: string | null;
 }
 
 interface ImportRequest {
@@ -169,10 +171,24 @@ Deno.serve(async (req: Request) => {
         neededInnings.add(`${uuid}:${b.innings_no}`);
       }
 
-      const inningsRows: Array<{ match_id: string; innings_no: number }> = [];
+      // Upsert innings with the unique index — one call instead of select+insert+re-fetch.
+      // Extract batting_team/bowling_team from ball records for each innings.
+      const inningsTeamMap = new Map<string, { batting_team?: string; bowling_team?: string }>();
+      for (const b of balls) {
+        const key = `${b.match_id}:${b.innings_no}`;
+        if (!inningsTeamMap.has(key)) {
+          const existing = inningsTeamMap.get(key) ?? {};
+          if (b.batting_team && !existing.batting_team) existing.batting_team = b.batting_team;
+          if (b.bowling_team && !existing.bowling_team) existing.bowling_team = b.bowling_team;
+          inningsTeamMap.set(key, existing);
+        }
+      }
+
+      const inningsRows: Array<{ match_id: string; innings_no: number; batting_team?: string; bowling_team?: string }> = [];
       for (const key of neededInnings) {
         const [uuidStr, noStr] = key.split(":");
-        inningsRows.push({ match_id: uuidStr, innings_no: Number.parseInt(noStr, 10) });
+        const teams = inningsTeamMap.get(`${uuidStr}:${noStr}`) ?? {};
+        inningsRows.push({ match_id: uuidStr, innings_no: Number.parseInt(noStr, 10), ...teams });
       }
 
       // Upsert innings with the unique index — one call instead of select+insert+re-fetch.
@@ -181,6 +197,49 @@ Deno.serve(async (req: Request) => {
           .from("innings")
           .upsert(batch, { onConflict: "match_id,innings_no", ignoreDuplicates: true });
         if (error) throw new Error(error.message);
+      }
+
+      // 3b. Update match stubs with team info extracted from ball records.
+      const matchTeamMap = new Map<string, { team1?: string; team2?: string }>();
+      for (const b of balls) {
+        if (!b.batting_team && !b.bowling_team) continue;
+        const existing = matchTeamMap.get(b.match_id) ?? {};
+        if (b.batting_team && !existing.team1) existing.team1 = b.batting_team;
+        if (b.bowling_team && !existing.team2) existing.team2 = b.bowling_team;
+        // If we see a second batting team, it becomes team2
+        if (b.batting_team && existing.team1 && b.batting_team !== existing.team1 && !existing.team2) {
+          existing.team2 = b.batting_team;
+        }
+        if (b.bowling_team && existing.team2 && b.bowling_team !== existing.team2 && !existing.team1) {
+          existing.team1 = b.bowling_team;
+        }
+        matchTeamMap.set(b.match_id, existing);
+      }
+
+      // Update match records that currently have no team info.
+      const matchUpdates: Array<{ match_id: string; team1?: string; team2?: string }> = [];
+      for (const [matchId, teams] of matchTeamMap) {
+        if (teams.team1 || teams.team2) {
+          matchUpdates.push({ match_id: matchId, team1: teams.team1, team2: teams.team2 });
+        }
+      }
+      if (matchUpdates.length > 0) {
+        // Only update rows where both teams are null (don't overwrite existing info).
+        for (const batch of chunks(matchUpdates, BATCH)) {
+          for (const update of batch) {
+            const updateFields: Record<string, string> = {};
+            if (update.team1) updateFields.team1 = update.team1;
+            if (update.team2) updateFields.team2 = update.team2;
+            if (Object.keys(updateFields).length === 0) continue;
+            const { error } = await admin
+              .from("matches")
+              .update(updateFields)
+              .eq("match_id", update.match_id)
+              .is("team1", "null")
+              .is("team2", "null");
+            if (error) throw new Error(error.message);
+          }
+        }
       }
 
       // 4. Resolve innings ids (single pass covers both existing + newly created).
