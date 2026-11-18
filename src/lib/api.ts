@@ -9,6 +9,7 @@ export interface MatchFilters {
   search?: string;
   page?: number;
   limit?: number;
+  [key: string]: string | number | undefined;
 }
 
 export interface PlayerFilters {
@@ -18,6 +19,7 @@ export interface PlayerFilters {
   team?: string;
   date_from?: string;
   date_to?: string;
+  [key: string]: string | number | undefined;
 }
 
 function buildQuery(filters: Record<string, string | number | undefined>): string {
