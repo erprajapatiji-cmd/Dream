@@ -119,7 +119,7 @@ function numericField(row: ParsedMatchRow, ...names: string[]): number {
   return Number.isFinite(value) ? value : 0;
 }
 
-function toBallPayload(row: ParsedMatchRow, matchIdOverride?: string): BallPayload | null {
+export function toBallPayload(row: ParsedMatchRow, matchIdOverride?: string): BallPayload | null {
   const matchId = matchIdOverride || uniqueMatchId(row);
   if (!matchId) return null;
 

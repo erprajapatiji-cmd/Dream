@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { classifyAndPair } from "@/lib/filePairing";
-import { normalizeMatchFormat, detectMatchFormat } from "@/lib/csvImport";
+import { normalizeMatchFormat, detectMatchFormat, toBallPayload } from "@/lib/csvImport";
 import { parseCricsheetCsv } from "@/lib/cricsheetCsv";
 import { parseCricsheetJson } from "@/lib/cricsheetJson";
+import { parseCSV, normalizeHeader } from "@/lib/csv";
 import type { ParsedMatchRow } from "@/lib/csv";
 
 function makeFile(name: string, content: string): File {
@@ -220,5 +221,72 @@ describe("parseCricsheetJson", () => {
 
   it("throws for invalid JSON", () => {
     expect(() => parseCricsheetJson("not json", "bad")).toThrow();
+  });
+});
+
+const MULTI_MATCH_CSV = `match_id,innings_no,over,ball,batter,bowler,non_striker,batsman_runs,extra_runs,total_runs,dismissal_kind,player_out,is_wicket,batting_team,bowling_team
+match_001,1,0,1,Virat Kohli,Mitchell Starc,Shubman Gill,4,0,4,,,1,India,Australia
+match_001,1,0,2,Virat Kohli,Mitchell Starc,Shubman Gill,0,0,0,,,0,India,Australia
+match_002,1,0,1,Rohit Sharma,Pat Cummins,KL Rahul,6,0,6,,,0,India,England
+match_002,1,0,2,Rohit Sharma,Pat Cummins,KL Rahul,1,0,1,,,0,India,England
+match_003,1,0,1,Steve Smith,James Anderson,David Warner,2,0,2,,,0,Australia,England
+match_003,1,0,2,Steve Smith,James Anderson,David Warner,0,0,0,bowled,Steve Smith,1,Australia,England`;
+
+describe("multi-match CSV — row-level match_id grouping", () => {
+  it("classifies tabular CSV with match_id column as tabular-balls", async () => {
+    const file = makeFile("multi_match_data.csv", MULTI_MATCH_CSV);
+    const result = await classifyAndPair([file]);
+    expect(result.ballOnly).toHaveLength(1);
+    expect(result.ballOnly[0].matchId).toBe("multi_match_data");
+  });
+
+  it("toBallPayload uses row match_id when no override is passed", () => {
+    const { rows } = parseCSV(MULTI_MATCH_CSV);
+    const payloads = rows.map((r) => toBallPayload(r, undefined)).filter(Boolean);
+    expect(payloads).toHaveLength(6);
+    const matchIds = new Set(payloads.map((p) => p!.match_id));
+    expect(matchIds.has("match_001")).toBe(true);
+    expect(matchIds.has("match_002")).toBe(true);
+    expect(matchIds.has("match_003")).toBe(true);
+    expect(matchIds.size).toBe(3);
+  });
+
+  it("toBallPayload uses override when provided, ignoring row match_id", () => {
+    const { rows } = parseCSV(MULTI_MATCH_CSV);
+    const payloads = rows.map((r) => toBallPayload(r, "override_id")).filter(Boolean);
+    expect(payloads).toHaveLength(6);
+    expect(payloads.every((p) => p!.match_id === "override_id")).toBe(true);
+  });
+
+  it("toBallPayload extracts batting_team and bowling_team from rows", () => {
+    const { rows } = parseCSV(MULTI_MATCH_CSV);
+    const payloads = rows.map((r) => toBallPayload(r, undefined)).filter(Boolean);
+    expect(payloads[0]!.batting_team).toBe("India");
+    expect(payloads[0]!.bowling_team).toBe("Australia");
+    expect(payloads[2]!.batting_team).toBe("India");
+    expect(payloads[2]!.bowling_team).toBe("England");
+    expect(payloads[4]!.batting_team).toBe("Australia");
+    expect(payloads[4]!.bowling_team).toBe("England");
+  });
+
+  it("simulates streamImport multi-match detection logic", () => {
+    const { headers, rows } = parseCSV(MULTI_MATCH_CSV);
+    const hasMatchIdCol = headers.some((h) => normalizeHeader(h) === "matchid" || normalizeHeader(h) === "id");
+    expect(hasMatchIdCol).toBe(true);
+
+    const matchIdHeader = headers.find((h) => normalizeHeader(h) === "matchid" || normalizeHeader(h) === "id") ?? "match_id";
+    const distinctIds = new Set(rows.slice(0, 100).map((r) => r[matchIdHeader]));
+    expect(distinctIds.size).toBe(3);
+    expect(distinctIds.size > 1).toBe(true);
+  });
+
+  it("single-match CSV with match_id column still uses override (distinctIds.size === 1)", () => {
+    const singleMatchCSV = `match_id,innings_no,over,ball,batter,bowler,non_striker,batsman_runs,extra_runs,total_runs,is_wicket,batting_team,bowling_team
+match_001,1,0,1,Virat Kohli,Mitchell Starc,Shubman Gill,4,0,4,0,India,Australia
+match_001,1,0,2,Virat Kohli,Mitchell Starc,Shubman Gill,0,0,0,0,India,Australia`;
+    const { headers, rows } = parseCSV(singleMatchCSV);
+    const matchIdHeader = headers.find((h) => normalizeHeader(h) === "matchid" || normalizeHeader(h) === "id") ?? "match_id";
+    const distinctIds = new Set(rows.slice(0, 100).map((r) => r[matchIdHeader]));
+    expect(distinctIds.size).toBe(1);
   });
 });
