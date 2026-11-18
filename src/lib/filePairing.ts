@@ -36,6 +36,16 @@ function extractMatchId(fileName: string): string {
     .replace(/\.txt$/i, "");
 }
 
+async function hasInfoRows(file: File): Promise<boolean> {
+  const slice = file.slice(0, Math.min(65536, file.size));
+  const text = await slice.text();
+  const cleaned = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  for (const line of cleaned.split(/\r?\n/)) {
+    if (line.trim() && line.split(",")[0]?.toLowerCase() === "info") return true;
+  }
+  return false;
+}
+
 export async function classifyFile(file: File): Promise<ClassifiedFile> {
   const matchId = extractMatchId(file.name);
 
@@ -52,8 +62,23 @@ export async function classifyFile(file: File): Promise<ClassifiedFile> {
     return { file, kind: "unknown", matchId };
   }
 
-  if (normalizeHeader(headers[0]) === "version" || normalizeHeader(headers[0]) === "info") {
-    return { file, kind: "cricsheet-combined", matchId };
+  const firstHeader = normalizeHeader(headers[0]);
+
+  // Cricsheet format: starts with "version" or "info"
+  if (firstHeader === "version" || firstHeader === "info") {
+    // Only treat as combined if the file actually contains info rows.
+    // A separate ball file starts with "version" but has no "info" rows.
+    const hasInfo = await hasInfoRows(file);
+    if (hasInfo) {
+      return { file, kind: "cricsheet-combined", matchId };
+    }
+    // No info rows — this is a separate cricsheet ball file
+    return { file, kind: "cricsheet-balls", matchId };
+  }
+
+  // Cricsheet ball-only file might start with "ball" header
+  if (firstHeader === "ball") {
+    return { file, kind: "cricsheet-balls", matchId };
   }
 
   const detected = detectFormatFromHeaders(headers);
@@ -61,7 +86,6 @@ export async function classifyFile(file: File): Promise<ClassifiedFile> {
     return { file, kind: "summary", matchId };
   }
   if (detected === "balls") {
-    // Could be cricsheet-balls (paired with _info) or standalone tabular balls
     if (/^[0-9]+\.csv$/i.test(file.name)) {
       return { file, kind: "cricsheet-balls", matchId };
     }

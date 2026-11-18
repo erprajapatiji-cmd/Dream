@@ -60,6 +60,7 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
     let inningsCount = 0;
     let ballsCount = 0;
     let determinedTotal = false;
+    let useRowMatchId = false;
 
     setProgress({ total: totalRows, current: 0, phase: `${basePhase} — reading ${f.name}...`, committedRows: 0 });
 
@@ -70,11 +71,17 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
         const approxRowsPerByte = batch.rows.length / Math.min(f.size, 1024 * 1024);
         totalRows = Math.max(batch.rows.length, Math.floor(f.size * approxRowsPerByte));
         determinedTotal = true;
+        // Check if rows have their own match_id column with varying values (multi-match CSV)
+        const hasMatchIdCol = batch.headers.some((h) => normalizeHeader(h) === "matchid" || normalizeHeader(h) === "id");
+        if (hasMatchIdCol) {
+          const distinctIds = new Set(batch.rows.slice(0, 100).map((r) => r[batch.headers.find((h) => normalizeHeader(h) === "matchid" || normalizeHeader(h) === "id") ?? "match_id"]));
+          useRowMatchId = distinctIds.size > 1;
+        }
       }
 
       const res = await importBallsBatch(batch.rows, (c) => {
         setProgress({ total: totalRows, current: processed + batch.rows.length, phase: `${basePhase} — saving rows from ${f.name}...`, committedRows: committedRows + c });
-      }, matchId);
+      }, useRowMatchId ? undefined : matchId);
       processed += batch.rows.length;
       matchesCount += res.matches;
       inningsCount += res.innings;
