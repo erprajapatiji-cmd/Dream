@@ -207,7 +207,8 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
         } catch (err) {
           console.error(`Import failed for pair ${group.matchId}`, err);
           summary.failedFiles += 1;
-          failedFiles.push(group.matchId);
+          const errMsg = err instanceof Error ? err.message : String(err);
+          failedFiles.push(`${group.matchId}: ${errMsg.slice(0, 120)}`);
         } finally {
           completedUnits += 1;
           tickProgress(`Processed ${completedUnits}/${totalUnits} groups`, summary.importedBalls);
@@ -227,7 +228,8 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
         } catch (err) {
           console.error(`Import failed for ${file.name}`, err);
           summary.failedFiles += 1;
-          failedFiles.push(file.name);
+          const errMsg = err instanceof Error ? err.message : String(err);
+          failedFiles.push(`${file.name}: ${errMsg.slice(0, 120)}`);
         } finally {
           completedUnits += 1;
           tickProgress(`Processed ${completedUnits}/${totalUnits} files`, summary.importedBalls);
@@ -247,7 +249,8 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
         } catch (err) {
           console.error(`Import failed for ${file.name}`, err);
           summary.failedFiles += 1;
-          failedFiles.push(file.name);
+          const errMsg = err instanceof Error ? err.message : String(err);
+          failedFiles.push(`${file.name}: ${errMsg.slice(0, 120)}`);
         } finally {
           completedUnits += 1;
           tickProgress(`Processed ${completedUnits}/${totalUnits} files`, summary.importedBalls);
@@ -263,7 +266,8 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
         } catch (err) {
           console.error(`Import failed for ${file.name}`, err);
           summary.failedFiles += 1;
-          failedFiles.push(file.name);
+          const errMsg = err instanceof Error ? err.message : String(err);
+          failedFiles.push(`${file.name}: ${errMsg.slice(0, 120)}`);
         } finally {
           completedUnits += 1;
           tickProgress(`Processed ${completedUnits}/${totalUnits} files`, summary.importedBalls);
@@ -285,12 +289,13 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
       }
 
       if (summary.importedMatches === 0 && summary.importedBalls === 0) {
-        throw new Error("No ball-by-ball data was found in the selected files, so nothing was saved.");
+        const detail = failedFiles.length > 0 ? ` Errors: ${failedFiles.slice(0, 3).join("; ")}` : "";
+        throw new Error(`No ball-by-ball data was saved.${detail}`);
       }
 
       const allNotices: string[] = [...warnings];
       if (summary.failedFiles > 0) {
-        allNotices.push(`${summary.failedFiles} file(s) could not be imported.`);
+        allNotices.push(`${summary.failedFiles} file(s) could not be imported: ${failedFiles.slice(0, 5).join("; ")}`);
       }
       if (summary.skippedFiles > 0) {
         allNotices.push(`${summary.skippedFiles} file(s) were skipped because they have no ball-by-ball data.`);

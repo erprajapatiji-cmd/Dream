@@ -32,7 +32,7 @@ export default function MatchesPage({ onNavigate, backgroundUpload }: MatchesPag
         .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
 
       if (err) {
-        setError(err.message);
+        setError(`Database error: ${err.message}${err.code ? ` (code: ${err.code})` : ""}`);
         setLoading(false);
         return;
       }
