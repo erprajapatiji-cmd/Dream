@@ -7,6 +7,14 @@ export interface CsvImportResult {
   committed: number;
 }
 
+export interface BatchProgress {
+  committed: number;
+  total: number;
+  batchSize: number;
+  rowsSent: number;
+  retries: number;
+}
+
 interface MatchPayload {
   match_id: string;
   match_format: string;
@@ -158,18 +166,40 @@ export function toBallPayload(row: ParsedMatchRow, matchIdOverride?: string): Ba
 }
 
 const EDGE_FUNCTION_TIMEOUT_MS = 60000;
+const MAX_BATCH = 2000;
+const MIN_BATCH = 100;
+const BATCH_SPLIT_STEPS = [2000, 1000, 500, 250, 100];
+const FAST_THRESHOLD_MS = 15000;
+const MAX_RETRIES = 3;
 
-async function postImport(payload: {
-  format: "matches" | "balls";
-  matches?: MatchPayload[];
-  balls?: BallPayload[];
-  matchStubs?: string[];
-}): Promise<{ committed: number; matchesCreated?: number; inningsCreated?: number }> {
+function isRetryableError(err: unknown, statusCode?: number): boolean {
+  if (err instanceof DOMException && err.name === "AbortError") return true;
+  if (err instanceof TypeError) return true; // network error
+  if (statusCode) {
+    return statusCode === 408 || statusCode === 429 || (statusCode >= 500 && statusCode < 600);
+  }
+  // Check for network-related messages
+  const msg = err instanceof Error ? err.message.toLowerCase() : "";
+  return msg.includes("failed to fetch") || msg.includes("network") || msg.includes("timeout") || msg.includes("aborted");
+}
+
+function extractStatusCode(err: unknown): number | undefined {
+  const msg = err instanceof Error ? err.message : "";
+  const match = msg.match(/returned (\d{3})/);
+  return match ? Number.parseInt(match[1], 10) : undefined;
+}
+
+async function postImport(
+  payload: { format: "matches" | "balls"; matches?: MatchPayload[]; balls?: BallPayload[]; matchStubs?: string[] },
+  onRetry?: (attempt: number, reason: string) => void
+): Promise<{ committed: number; matchesCreated?: number; inningsCreated?: number; durationMs: number }> {
   let lastError: Error | null = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), EDGE_FUNCTION_TIMEOUT_MS);
+      const startTime = performance.now();
       const response = await fetch(
         `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/csv-import`,
         {
@@ -183,12 +213,23 @@ async function postImport(payload: {
         }
       );
       clearTimeout(timeoutId);
+      const durationMs = performance.now() - startTime;
+
       if (!response.ok) {
         const retryAfter = Number.parseInt(response.headers.get("Retry-After") ?? "", 10);
         const errorText = await response.text().catch(() => "");
-        const detail = errorText ? `: ${errorText.slice(0, 160)}` : "";
-        throw new Error(`Import service returned ${response.status}${detail}${retryAfter ? `|retry-after=${retryAfter}` : ""}`);
+        const detail = errorText ? `: ${errorText.slice(0, 200)}` : "";
+        const error = new Error(`Import service returned ${response.status}${detail}${retryAfter ? `|retry-after=${retryAfter}` : ""}`);
+        if (isRetryableError(error, response.status) && attempt < MAX_RETRIES - 1) {
+          onRetry?.(attempt + 1, `HTTP ${response.status}`);
+          const retryAfterMs = retryAfter ? retryAfter * 1000 : 0;
+          const delay = Math.max(retryAfterMs, 1500 * 2 ** attempt);
+          await new Promise<void>((resolve) => setTimeout(resolve, delay));
+          continue;
+        }
+        throw error;
       }
+
       const data = await response.json();
       if (!data || typeof data !== "object") throw new Error("Invalid response from import service");
       if (data.error) throw new Error(String(data.error));
@@ -196,34 +237,100 @@ async function postImport(payload: {
         committed: Number(data.committed ?? 0),
         matchesCreated: Number(data.matchesCreated ?? 0),
         inningsCreated: Number(data.inningsCreated ?? 0),
+        durationMs,
       };
     } catch (err) {
-      const isAbort = err instanceof DOMException && err.name === "AbortError";
+      const status = extractStatusCode(err);
       lastError = err instanceof Error ? err : new Error(String(err));
-      if (attempt < 2) {
-        const retryAfterMatch = lastError.message.match(/\|retry-after=(\d+)/);
-        const retryAfterMs = retryAfterMatch ? Number.parseInt(retryAfterMatch[1], 10) * 1000 : 0;
-        const delay = Math.max(retryAfterMs, 1500 * 2 ** attempt);
-        await new Promise<void>((resolve) => setTimeout(resolve, delay));
+
+      if (isRetryableError(err, status) && attempt < MAX_RETRIES - 1) {
+        const reason = err instanceof DOMException && err.name === "AbortError" ? "timeout" : status ? `HTTP ${status}` : "network";
+        onRetry?.(attempt + 1, reason);
+        await new Promise<void>((resolve) => setTimeout(resolve, 1500 * 2 ** attempt));
+        continue;
       }
-      if (isAbort) {
-        console.warn(`Import batch timed out after ${EDGE_FUNCTION_TIMEOUT_MS}ms, retrying...`);
-      }
+      throw lastError;
     }
   }
   throw lastError ?? new Error("Import request failed");
 }
 
-function chunks<T>(items: T[], size: number): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
-  return out;
+interface AdaptiveBatchResult {
+  committed: number;
+  matchesCreated: number;
+  inningsCreated: number;
+  totalRetries: number;
+  finalBatchSize: number;
 }
 
-// Send up to CONCURRENCY batches in parallel to keep the network pipeline full.
-const CONCURRENCY = 2;
-const MATCH_BATCH = 2000;
-const BALL_BATCH = 2000;
+async function sendBatchAdaptive<T extends MatchPayload | BallPayload>(
+  items: T[],
+  buildPayload: (slice: T[]) => { format: "matches" | "balls"; matches?: MatchPayload[]; balls?: BallPayload[]; matchStubs?: string[] },
+  onProgress?: (p: BatchProgress) => void,
+  initialBatchSize?: number
+): Promise<AdaptiveBatchResult> {
+  let batchSize = Math.min(initialBatchSize ?? MAX_BATCH, MAX_BATCH);
+  let committed = 0;
+  let matchesCreated = 0;
+  let inningsCreated = 0;
+  let totalRetries = 0;
+  let offset = 0;
+
+  while (offset < items.length) {
+    const slice = items.slice(offset, offset + batchSize);
+  
+    try {
+      const result = await postImport(buildPayload(slice), () => {
+        totalRetries += 1;
+        onProgress?.({
+          committed,
+          total: items.length,
+          batchSize,
+          rowsSent: slice.length,
+          retries: totalRetries,
+        });
+      });
+
+      committed += result.committed;
+      matchesCreated += result.matchesCreated ?? 0;
+      inningsCreated += result.inningsCreated ?? 0;
+      offset += slice.length;
+
+      // Ramp up if request was fast
+      if (result.durationMs < FAST_THRESHOLD_MS && batchSize < MAX_BATCH) {
+        const nextStep = BATCH_SPLIT_STEPS.find((s) => s > batchSize);
+        if (nextStep) batchSize = nextStep;
+      }
+
+      onProgress?.({
+        committed,
+        total: items.length,
+        batchSize,
+        rowsSent: slice.length,
+        retries: totalRetries,
+      });
+    } catch (err) {
+      // Split batch in half on failure
+      if (slice.length > MIN_BATCH) {
+        const halfSize = Math.max(MIN_BATCH, Math.floor(slice.length / 2));
+        batchSize = halfSize;
+        totalRetries += 1;
+        onProgress?.({
+          committed,
+          total: items.length,
+          batchSize,
+          rowsSent: slice.length,
+          retries: totalRetries,
+        });
+        // Retry the same offset with smaller batch — don't advance offset
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  return { committed, matchesCreated, inningsCreated, totalRetries, finalBatchSize: batchSize };
+}
 
 export async function importMatchesBatch(
   rows: ParsedMatchRow[],
@@ -233,18 +340,16 @@ export async function importMatchesBatch(
   if (total === 0) return 0;
 
   const payloads = rows.map(toMatchPayload).filter((payload): payload is MatchPayload => payload !== null);
-  const batches = chunks(payloads, MATCH_BATCH);
-  let committed = 0;
+  if (payloads.length === 0) return 0;
 
-  for (let i = 0; i < batches.length; i += CONCURRENCY) {
-    const group = batches.slice(i, i + CONCURRENCY);
-    await Promise.all(group.map(async (batch) => {
-      const result = await postImport({ format: "matches", matches: batch });
-      committed += result.committed;
-      onProgress?.(committed, total);
-    }));
-  }
-  return committed;
+  const result = await sendBatchAdaptive(
+    payloads,
+    (slice) => ({ format: "matches", matches: slice }),
+    onProgress
+      ? (p) => onProgress(p.committed, p.total)
+      : undefined
+  );
+  return result.committed;
 }
 
 export async function importBallsBatch(
@@ -252,7 +357,6 @@ export async function importBallsBatch(
   onProgress?: (current: number, total: number) => void,
   matchIdOverride?: string,
 ): Promise<CsvImportResult> {
-  const total = rows.length;
   const payloads: BallPayload[] = [];
   for (const row of rows) {
     const ball = toBallPayload(row, matchIdOverride);
@@ -262,25 +366,22 @@ export async function importBallsBatch(
     return { matches: 0, innings: 0, balls: 0, committed: 0 };
   }
 
-  const batches = chunks(payloads, BALL_BATCH).map((slice) => ({
-    balls: slice,
-    matchStubs: [...new Set(slice.map((b) => b.match_id))],
-  }));
+  const result = await sendBatchAdaptive(
+    payloads,
+    (slice) => ({
+      format: "balls",
+      balls: slice,
+      matchStubs: [...new Set(slice.map((b) => b.match_id))],
+    }),
+    onProgress
+      ? (p) => onProgress(p.committed, p.total)
+      : undefined
+  );
 
-  let matchesCreated = 0;
-  let inningsCreated = 0;
-  let committed = 0;
-
-  for (let i = 0; i < batches.length; i += CONCURRENCY) {
-    const group = batches.slice(i, i + CONCURRENCY);
-    await Promise.all(group.map(async (batch) => {
-      const result = await postImport({ format: "balls", ...batch });
-      committed += result.committed;
-      matchesCreated += result.matchesCreated ?? 0;
-      inningsCreated += result.inningsCreated ?? 0;
-      onProgress?.(committed, total);
-    }));
-  }
-
-  return { matches: matchesCreated, innings: inningsCreated, balls: committed, committed };
+  return {
+    matches: result.matchesCreated,
+    innings: result.inningsCreated,
+    balls: result.committed,
+    committed: result.committed,
+  };
 }

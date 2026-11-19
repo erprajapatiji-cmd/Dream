@@ -5,6 +5,9 @@ export interface ImportProgress {
   current: number;
   phase: string;
   committedRows: number;
+  batchSize?: number;
+  rowsSent?: number;
+  retries?: number;
 }
 
 export interface ImportResult {

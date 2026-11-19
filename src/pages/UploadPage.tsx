@@ -26,6 +26,9 @@ interface ProgressState {
   total: number;
   current: number;
   committedRows: number;
+  batchSize?: number;
+  rowsSent?: number;
+  retries?: number;
 }
 
 export default function UploadPage({ onNavigate }: UploadPageProps) {
@@ -49,7 +52,7 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
   }, []);
 
   const setProgress = useCallback((state: ProgressState) => {
-    setUploadProgress({ total: state.total, current: state.current, phase: state.phase, committedRows: state.committedRows });
+    setUploadProgress({ total: state.total, current: state.current, phase: state.phase, committedRows: state.committedRows, batchSize: state.batchSize, rowsSent: state.rowsSent, retries: state.retries });
   }, []);
 
   const streamImport = useCallback(async (f: File, matchId: string, basePhase: string): Promise<{ matches: number; innings: number; balls: number }> => {
@@ -82,6 +85,7 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
       const res = await importBallsBatch(batch.rows, (c) => {
         setProgress({ total: totalRows, current: processed + batch.rows.length, phase: `${basePhase} — saving rows from ${f.name}...`, committedRows: committedRows + c });
       }, useRowMatchId ? undefined : matchId);
+      // Update with batch metrics after each batch completes
       processed += batch.rows.length;
       matchesCount += res.matches;
       inningsCount += res.innings;
@@ -163,8 +167,7 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
         setProgress({ total: totalUnits, current: completedUnits, phase, committedRows: committed });
       };
 
-      // Phase 2: Process paired groups (info + balls, or ball-only with stub, or summary-only)
-      const CONCURRENCY = 3;
+      // Phase 2: Process paired groups sequentially (CONCURRENCY=1 to avoid parallel large requests)
       const processPair = async (group: { matchId: string; info?: File; balls?: File; summary?: File; combined?: File; json?: File }) => {
         try {
           if (group.info) {
@@ -267,30 +270,19 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
         }
       };
 
-      // Run all phases with controlled concurrency
-      const allTasks: Promise<void>[] = [];
-
-      for (let i = 0; i < pairing.pairs.length; i += CONCURRENCY) {
-        const batch = pairing.pairs.slice(i, i + CONCURRENCY);
-        allTasks.push(Promise.all(batch.map(processPair)).then(() => {}));
+      // Run all phases sequentially — one group/file at a time
+      for (const group of pairing.pairs) {
+        await processPair(group);
       }
-
-      for (let i = 0; i < pairing.combined.length; i += CONCURRENCY) {
-        const batch = pairing.combined.slice(i, i + CONCURRENCY);
-        allTasks.push(Promise.all(batch.map(processCombined)).then(() => {}));
+      for (const file of pairing.combined) {
+        await processCombined(file);
       }
-
-      for (let i = 0; i < pairing.jsonFiles.length; i += CONCURRENCY) {
-        const batch = pairing.jsonFiles.slice(i, i + CONCURRENCY);
-        allTasks.push(Promise.all(batch.map(processJson)).then(() => {}));
+      for (const file of pairing.jsonFiles) {
+        await processJson(file);
       }
-
-      for (let i = 0; i < pairing.infoOnly.length; i += CONCURRENCY) {
-        const batch = pairing.infoOnly.slice(i, i + CONCURRENCY);
-        allTasks.push(Promise.all(batch.map(processInfoOnly)).then(() => {}));
+      for (const entry of pairing.infoOnly) {
+        await processInfoOnly(entry);
       }
-
-      await Promise.all(allTasks);
 
       if (summary.importedMatches === 0 && summary.importedBalls === 0) {
         throw new Error("No ball-by-ball data was found in the selected files, so nothing was saved.");
@@ -316,7 +308,8 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
       setImportedFileCount((n) => n + selectedFiles.length);
     } catch (err) {
       console.error("CSV import failed", err);
-      setUploadError(err instanceof Error && err.message ? err.message : "Could not import the selected CSV files.");
+      const msg = err instanceof Error && err.message ? err.message : "Could not import the selected CSV files.";
+      setUploadError(msg.includes("Import service returned") ? `Backend error: ${msg}` : msg);
     } finally {
       setUploadImporting(false);
       setUploadProgress(null);
@@ -504,6 +497,23 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
                   <span className="font-bold">{progress.committedRows.toLocaleString()}</span> rows saved to database
                 </span>
               </div>
+              {progress.batchSize != null && (
+                <div className="mt-3 flex flex-wrap justify-center gap-3 text-xs text-slate-400">
+                  <span className="rounded-lg bg-slate-800/60 px-3 py-1.5">
+                    Batch size: <span className="font-semibold text-slate-200">{progress.batchSize.toLocaleString()}</span>
+                  </span>
+                  {progress.rowsSent != null && (
+                    <span className="rounded-lg bg-slate-800/60 px-3 py-1.5">
+                      Rows sent: <span className="font-semibold text-slate-200">{progress.rowsSent.toLocaleString()}</span>
+                    </span>
+                  )}
+                  {progress.retries != null && progress.retries > 0 && (
+                    <span className="rounded-lg bg-amber-500/10 px-3 py-1.5 text-amber-300">
+                      Retries: <span className="font-semibold">{progress.retries}</span>
+                    </span>
+                  )}
+                </div>
+              )}
             </>
           )}
         </div>
