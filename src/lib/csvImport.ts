@@ -310,8 +310,9 @@ async function sendBatchAdaptive<T extends MatchPayload | BallPayload>(
         retries: totalRetries,
       });
     } catch (err) {
-      // Split batch in half on failure
-      if (slice.length > MIN_BATCH) {
+      const status = extractStatusCode(err);
+      // Only split and retry on retryable errors (timeout, network, 408, 429, 5xx)
+      if (isRetryableError(err, status) && slice.length > MIN_BATCH) {
         const halfSize = Math.max(MIN_BATCH, Math.floor(slice.length / 2));
         batchSize = halfSize;
         totalRetries += 1;

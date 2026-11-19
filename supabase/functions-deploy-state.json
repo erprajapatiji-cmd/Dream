@@ -6,8 +6,8 @@
       "hash": "36131177bb7763c0ad9451af68be32f733157acb178a39f64b3dddb5410aae22"
     },
     "csv-import": {
-      "hasChanged": false,
-      "hash": "3ba05e12980a5fe27995ff1f05964563e7d1c99b49509186ffdbc583267406e1"
+      "hasChanged": true,
+      "hash": "6d4e715d24382b2b3cca809e4948d626b469fb6669640d5926d051679299a87b"
     },
     "source-code": {
       "hasChanged": false,
