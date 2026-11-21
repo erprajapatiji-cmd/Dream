@@ -97,10 +97,19 @@ Deno.serve(async (req: Request) => {
     return new Response(null, { status: 200, headers: corsHeaders });
   }
 
+  let body: ImportRequest;
+  try {
+    body = (await req.json()) as ImportRequest;
+  } catch {
+    return new Response(JSON.stringify({ error: "Invalid JSON in request body" }), {
+      status: 400,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
   try {
     const admin = getAdmin();
 
-    const body = (await req.json()) as ImportRequest;
     if (!body || !body.format) {
       return new Response(JSON.stringify({ error: "Missing 'format' in request body" }), {
         status: 400,
@@ -136,7 +145,11 @@ Deno.serve(async (req: Request) => {
         return json({ committed: 0, matchesCreated: 0, inningsCreated: 0, ballsRequested: 0 });
       }
 
-      const stubs = [...new Set((body.matchStubs ?? []).filter(Boolean))];
+      const explicitStubs = [...new Set((body.matchStubs ?? []).filter(Boolean))];
+      // If no matchStubs provided, derive from ball records so matches are always created.
+      const stubs = explicitStubs.length > 0
+        ? explicitStubs
+        : [...new Set(balls.map((b) => b.match_id).filter(Boolean))];
 
       // 1. Upsert match stubs (only match_id, no detail overwrite).
       let matchesCreated = 0;
@@ -318,8 +331,12 @@ Deno.serve(async (req: Request) => {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    // DB constraint/validation errors (235xx Postgres error codes) are client errors, not server errors.
+    // Return 400 so the frontend doesn't retry them as retryable 5xx.
+    const isDbValidationError = /235\d{2}/.test(message) || /duplicate key|violates|constraint|invalid input/i.test(message);
+    const status = isDbValidationError ? 400 : 500;
     return new Response(JSON.stringify({ error: message }), {
-      status: 500,
+      status,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
