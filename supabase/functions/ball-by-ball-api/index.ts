@@ -120,6 +120,130 @@ function applyMatchFilters(query: SupabaseQuery, filters: MatchFilters): Supabas
 }
 
 const MATCH_COLUMNS = "id, match_id, match_format, season, city, date, team1, team2, toss_winner, toss_decision, result, result_margin, player_of_match, venue, umpire1, umpire2, created_at";
+const TIGZIG_URL = "https://tigzig.com";
+const TIGZIG_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const TIGZIG_TIMEOUT_MS = 10000;
+
+type TigzigRow = Record<string, unknown>;
+
+function sqlText(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function sqlDate(value: string | null): string {
+  return value ? `DATE ${sqlText(value)}` : "DATE '1900-01-01'";
+}
+
+function normalizeTigzigRows(payload: unknown): TigzigRow[] {
+  if (Array.isArray(payload)) return payload.filter((row): row is TigzigRow => Boolean(row && typeof row === "object" && !Array.isArray(row)));
+  if (!payload || typeof payload !== "object") return [];
+  const body = payload as { columns?: unknown; rows?: unknown; data?: unknown; result?: unknown };
+  const rows = Array.isArray(body.rows) ? body.rows : Array.isArray(body.data) ? body.data : Array.isArray(body.result) ? body.result : [];
+  if (!Array.isArray(body.columns)) return rows.filter((row): row is TigzigRow => Boolean(row && typeof row === "object" && !Array.isArray(row)));
+  return rows.map((row) => {
+    if (!Array.isArray(row)) return row as TigzigRow;
+    return Object.fromEntries(body.columns.map((column, index) => [String(column), row[index]]));
+  });
+}
+
+async function waitForTigzigSlot(supabase: AdminClient): Promise<void> {
+  const { data, error } = await supabase.rpc("claim_tigzig_request_slot");
+  if (error) throw new Error("TigZig request gate unavailable");
+  const scheduled = new Date(String(data)).getTime();
+  const delay = scheduled - Date.now();
+  if (delay > 0) await new Promise<void>((resolve) => setTimeout(resolve, delay));
+}
+
+async function fetchTigzigRows(supabase: AdminClient, sql: string): Promise<TigzigRow[]> {
+  const queryHash = await hashKey(sql);
+  const now = new Date().toISOString();
+  const { data: cached, error: cacheError } = await supabase
+    .from("tigzig_sql_cache")
+    .select("response_json, expires_at")
+    .eq("query_hash", queryHash)
+    .gt("expires_at", now)
+    .maybeSingle();
+  if (!cacheError && cached?.response_json) return normalizeTigzigRows(cached.response_json);
+
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await waitForTigzigSlot(supabase);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), TIGZIG_TIMEOUT_MS);
+      const response = await fetch(TIGZIG_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ sql }),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (!response.ok) {
+        const message = `TigZig returned ${response.status}`;
+        if (response.status !== 429 && response.status < 500) throw new Error(message);
+        throw new Error(message);
+      }
+      const payload = await response.json();
+      const rows = normalizeTigzigRows(payload);
+      await supabase.from("tigzig_sql_cache").upsert({
+        query_hash: queryHash,
+        sql_query: sql,
+        response_json: payload,
+        expires_at: new Date(Date.now() + TIGZIG_CACHE_TTL_MS).toISOString(),
+      }, { onConflict: "query_hash" });
+      return rows;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      const retryable = lastError.name === "AbortError" || /TigZig returned (429|5\\d\\d)/.test(lastError.message);
+      if (!retryable || attempt === 2) break;
+      await new Promise<void>((resolve) => setTimeout(resolve, 2500));
+    }
+  }
+  console.warn("TigZig fallback unavailable", lastError?.message);
+  return [];
+}
+
+function remoteMatch(row: TigzigRow): Record<string, unknown> | null {
+  const matchId = String(row.match_id ?? "");
+  if (!matchId) return null;
+  const date = row.start_date ?? row.match_date ?? row.date ?? null;
+  const matchType = String(row.match_type ?? "Unknown").toUpperCase();
+  return {
+    id: `tigzig:${matchId}`,
+    match_id: matchId,
+    match_format: matchType === "TEST" ? "Test" : matchType === "IPL" ? "T20" : matchType,
+    season: row.season ?? null,
+    city: row.city ?? null,
+    date,
+    team1: row.team1 ?? null,
+    team2: row.team2 ?? null,
+    toss_winner: row.toss_winner ?? null,
+    toss_decision: row.toss_decision ?? null,
+    result: row.winner ?? null,
+    result_margin: row.winner_runs ? `${row.winner_runs} runs` : row.winner_wickets ? `${row.winner_wickets} wickets` : null,
+    player_of_match: row.player_of_match ?? null,
+    venue: row.venue ?? null,
+    umpire1: row.umpire1 ?? null,
+    umpire2: row.umpire2 ?? null,
+    created_at: null,
+  };
+}
+
+function remoteMatchSql(filters: MatchFilters, latestDate: string | null, playerName?: string): string {
+  const conditions = [`m.start_date > ${sqlDate(latestDate)}`];
+  if (playerName) {
+    const name = sqlText(playerName);
+    conditions.push(`EXISTS (SELECT 1 FROM ball_by_ball b WHERE b.match_id = m.match_id AND (lower(b.striker) = lower(${name}) OR lower(b.non_striker) = lower(${name}) OR lower(b.bowler) = lower(${name}) OR lower(b.player_dismissed) = lower(${name}) OR lower(b.fielder) LIKE '%' || ${name} || '%'))`);
+  }
+  if (filters.matchId) conditions.push(`m.match_id = ${sqlText(filters.matchId)}`);
+  if (filters.format) conditions.push(`m.match_type = ${sqlText(filters.format === "Test" ? "TEST" : filters.format)}`);
+  if (filters.season) conditions.push(`m.season = ${sqlText(filters.season)}`);
+  if (filters.team) conditions.push(`(${sqlText(filters.team)} ILIKE '%' || m.team1 || '%' OR ${sqlText(filters.team)} ILIKE '%' || m.team2 || '%')`);
+  if (filters.dateFrom) conditions.push(`m.start_date >= ${sqlDate(filters.dateFrom)}`);
+  if (filters.dateTo) conditions.push(`m.start_date <= ${sqlDate(filters.dateTo)}`);
+  if (filters.search) conditions.push(`(${sqlText(filters.search)} ILIKE '%' || m.match_id || '%' OR ${sqlText(filters.search)} ILIKE '%' || m.team1 || '%' OR ${sqlText(filters.search)} ILIKE '%' || m.team2 || '%' OR ${sqlText(filters.search)} ILIKE '%' || m.venue || '%' OR ${sqlText(filters.search)} ILIKE '%' || m.city || '%')`);
+  return `SELECT m.match_id, m.match_type, m.team1, m.team2, m.season, m.start_date, m.venue, m.city, m.toss_winner, m.toss_decision, m.winner, m.winner_runs, m.winner_wickets, m.player_of_match, m.umpire1, m.umpire2 FROM match_info m WHERE ${conditions.join(" AND ")} ORDER BY m.start_date DESC LIMIT 1000`;
+}
 
 async function handleMatches(supabase: AdminClient, url: URL): Promise<Response> {
   const parsed = parseMatchFilters(url);
