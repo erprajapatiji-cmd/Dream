@@ -309,6 +309,7 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
         matches: summary.importedMatches,
         innings: summary.importedInnings,
         balls: summary.importedBalls,
+        filesProcessed: selectedFiles.length,
       });
       setImportedFileCount((n) => n + selectedFiles.length);
     } catch (err) {
@@ -421,7 +422,7 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
               <CheckCircle className="text-emerald-400" size={28} />
               <div>
                 <h2 className="text-lg font-semibold text-emerald-300">Import Complete</h2>
-                <p className="mt-1 text-sm text-emerald-200/70">{importedFileCount} file{importedFileCount !== 1 ? "s" : ""} processed</p>
+                <p className="mt-1 text-sm text-emerald-200/70">{result.filesProcessed ?? importedFileCount} file{(result.filesProcessed ?? importedFileCount) !== 1 ? "s" : ""} processed</p>
               </div>
             </div>
             <span className="inline-flex w-fit items-center rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-300">
@@ -440,7 +441,7 @@ export default function UploadPage({ onNavigate }: UploadPageProps) {
             </div>
             <div className="rounded-lg bg-slate-900/60 p-4 text-center">
               <p className="text-2xl font-bold">{(result.importedBalls ?? 0).toLocaleString()}</p>
-              <p className="text-sm text-slate-400">Balls</p>
+              <p className="text-sm text-slate-400">New balls saved</p>
             </div>
           </div>
 

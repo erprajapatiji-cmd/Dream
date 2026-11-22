@@ -20,6 +20,7 @@ export interface ImportResult {
   ballOnlyFiles?: number;
   summaryFiles?: number;
   jsonFiles?: number;
+  filesProcessed?: number;
   importedMatches?: number;
   importedInnings?: number;
   importedBalls?: number;

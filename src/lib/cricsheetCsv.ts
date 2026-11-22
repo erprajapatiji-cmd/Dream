@@ -59,7 +59,7 @@ function toBallRow(columns: string[], matchId: string): ParsedMatchRow {
   return {
     match_id: matchId,
     innings_no: columns[1] ?? "",
-    actual_delivery: columns[16] || columns[2] || "",
+    actual_delivery: columns[2] ?? "",
     batter: columns[4] ?? "",
     non_striker: columns[5] ?? "",
     bowler: columns[6] ?? "",
