@@ -194,7 +194,7 @@ async function fetchTigzigRows(supabase: AdminClient, sql: string): Promise<Tigz
       return rows;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
-      const retryable = lastError.name === "AbortError" || /TigZig returned (429|5\\d\\d)/.test(lastError.message);
+      const retryable = lastError.name === "AbortError" || /TigZig returned (429|5\d\d)/.test(lastError.message);
       if (!retryable || attempt === 2) break;
       await new Promise<void>((resolve) => setTimeout(resolve, 2500));
     }
@@ -245,6 +245,35 @@ function remoteMatchSql(filters: MatchFilters, latestDate: string | null, player
   return `SELECT m.match_id, m.match_type, m.team1, m.team2, m.season, m.start_date, m.venue, m.city, m.toss_winner, m.toss_decision, m.winner, m.winner_runs, m.winner_wickets, m.player_of_match, m.umpire1, m.umpire2 FROM match_info m WHERE ${conditions.join(" AND ")} ORDER BY m.start_date DESC LIMIT 1000`;
 }
 
+async function latestLocalMatchDate(supabase: AdminClient, filters: MatchFilters): Promise<string | null> {
+  let query = supabase.from("matches").select("date").not("date", "is", null).order("date", { ascending: false }).limit(1);
+  if (filters.matchId) query = query.eq("match_id", filters.matchId);
+  if (filters.format) query = query.eq("match_format", filters.format);
+  if (filters.season) query = query.eq("season", filters.season);
+  if (filters.team) query = query.or(`team1.ilike.%${filters.team}%,team2.ilike.%${filters.team}%`);
+  if (filters.dateFrom) query = query.gte("date", filters.dateFrom);
+  if (filters.dateTo) query = query.lte("date", filters.dateTo);
+  if (filters.search) query = query.or(`match_id.ilike.%${filters.search}%,team1.ilike.%${filters.search}%,team2.ilike.%${filters.search}%,venue.ilike.%${filters.search}%,city.ilike.%${filters.search}%`);
+  const { data, error } = await query.maybeSingle();
+  if (error) throw new Error(error.message);
+  return data?.date ?? null;
+}
+
+function mergeRemoteMatches(local: unknown[], remoteRows: TigzigRow[]): Record<string, unknown>[] {
+  const merged = new Map<string, Record<string, unknown>>();
+  for (const row of local) {
+    if (row && typeof row === "object") {
+      const item = row as Record<string, unknown>;
+      merged.set(String(item.match_id), item);
+    }
+  }
+  for (const row of remoteRows) {
+    const item = remoteMatch(row);
+    if (item && !merged.has(String(item.match_id))) merged.set(String(item.match_id), item);
+  }
+  return [...merged.values()].sort((a, b) => String(b.date ?? "").localeCompare(String(a.date ?? "")));
+}
+
 async function handleMatches(supabase: AdminClient, url: URL): Promise<Response> {
   const parsed = parseMatchFilters(url);
   if ("error" in parsed) return errorResponse(parsed.error, 400);
@@ -256,26 +285,30 @@ async function handleMatches(supabase: AdminClient, url: URL): Promise<Response>
 
   const from = (page - 1) * limit;
   const to = from + limit - 1;
-
   let query = supabase
     .from("matches")
     .select(MATCH_COLUMNS, { count: "exact" })
     .order("date", { ascending: false, nullsFirst: false })
     .range(from, to) as unknown as SupabaseQuery & { or: (filter: string) => SupabaseQuery & { data: unknown[]; error: { message: string } | null; count: number | null } };
   query = applyMatchFilters(query, parsed);
-
   const search = parsed.search?.toLowerCase();
-  if (search) {
-    query = query.or(`match_id.ilike.%${search}%,team1.ilike.%${search}%,team2.ilike.%${search}%,venue.ilike.%${search}%,city.ilike.%${search}%`);
-  }
+  if (search) query = query.or(`match_id.ilike.%${search}%,team1.ilike.%${search}%,team2.ilike.%${search}%,venue.ilike.%${search}%,city.ilike.%${search}%`);
 
   const { data, error, count } = await query;
   if (error) throw new Error(error.message);
 
-  const total = count ?? 0;
+  let remoteRows: TigzigRow[] = [];
+  if (page === 1) {
+    const latestDate = await latestLocalMatchDate(supabase, parsed);
+    remoteRows = await fetchTigzigRows(supabase, remoteMatchSql(parsed, latestDate));
+  }
+  const localMatches = (data ?? []) as unknown[];
+  const merged = page === 1 ? mergeRemoteMatches(localMatches, remoteRows) : localMatches as Record<string, unknown>[];
+  const total = (count ?? 0) + remoteRows.filter((row) => Boolean(remoteMatch(row))).length;
+  const pageMatches = page === 1 ? merged.slice(0, limit) : merged;
   const totalPages = Math.ceil(total / limit) || 0;
   return json({
-    matches: data ?? [],
+    matches: pageMatches,
     pagination: { page, limit, total, total_pages: totalPages, has_next: page < totalPages },
   });
 }
@@ -331,40 +364,73 @@ async function handleMatchBalls(supabase: AdminClient, matchId: string): Promise
   return json({ balls: balls ?? [] });
 }
 
+function latestDateFromRows(rows: unknown[]): string | null {
+  const dates = rows
+    .filter((row): row is Record<string, unknown> => Boolean(row && typeof row === "object"))
+    .map((row) => String(row.date ?? ""))
+    .filter(Boolean)
+    .sort();
+  return dates.at(-1) ?? null;
+}
+
+function remoteStatsSql(playerName: string, filters: MatchFilters, latestDate: string | null): string {
+  const name = sqlText(playerName);
+  const conditions = [`m.start_date > ${sqlDate(latestDate)}`, `(lower(b.striker) = lower(${name}) OR lower(b.non_striker) = lower(${name}) OR lower(b.bowler) = lower(${name}) OR lower(b.player_dismissed) = lower(${name}) OR lower(b.fielder) LIKE '%' || ${name} || '%')`];
+  if (filters.format) conditions.push(`m.match_type = ${sqlText(filters.format === "Test" ? "TEST" : filters.format)}`);
+  if (filters.season) conditions.push(`m.season = ${sqlText(filters.season)}`);
+  if (filters.team) conditions.push(`(${sqlText(filters.team)} ILIKE '%' || m.team1 || '%' OR ${sqlText(filters.team)} ILIKE '%' || m.team2 || '%')`);
+  if (filters.dateFrom) conditions.push(`m.start_date >= ${sqlDate(filters.dateFrom)}`);
+  if (filters.dateTo) conditions.push(`m.start_date <= ${sqlDate(filters.dateTo)}`);
+  return `SELECT count(DISTINCT b.match_id) AS matches, COALESCE(sum(CASE WHEN lower(b.striker) = lower(${name}) THEN b.runs_off_bat ELSE 0 END), 0) AS runs, count(*) FILTER (WHERE lower(b.striker) = lower(${name})) AS balls, count(*) FILTER (WHERE lower(b.striker) = lower(${name}) AND b.player_dismissed IS NOT NULL) AS outs, count(*) FILTER (WHERE lower(b.striker) = lower(${name}) AND b.runs_off_bat = 6) AS six_count, COALESCE(sum(CASE WHEN lower(b.bowler) = lower(${name}) THEN b.total_runs ELSE 0 END), 0) AS runs_conceded, count(*) FILTER (WHERE lower(b.bowler) = lower(${name})) AS bowling_balls, count(*) FILTER (WHERE lower(b.bowler) = lower(${name}) AND b.wicket_type IS NOT NULL) AS wickets FROM ball_by_ball b JOIN match_info m ON m.match_id = b.match_id WHERE ${conditions.join(" AND ")}`;
+}
+
+function mergeRemoteStats(local: Record<string, any>, remote: TigzigRow | undefined): Record<string, unknown> {
+  if (!remote) return local;
+  const remoteMatches = Number(remote.matches ?? 0);
+  const remoteRuns = Number(remote.runs ?? 0);
+  const remoteBalls = Number(remote.balls ?? 0);
+  const remoteOuts = Number(remote.outs ?? 0);
+  const remoteSixes = Number(remote.six_count ?? 0);
+  const remoteConceded = Number(remote.runs_conceded ?? 0);
+  const remoteBowlingBalls = Number(remote.bowling_balls ?? 0);
+  const remoteWickets = Number(remote.wickets ?? 0);
+  const batting = local.batting ?? {};
+  const bowling = local.bowling ?? {};
+  const runs = Number(batting.runs ?? 0) + remoteRuns;
+  const balls = Number(batting.balls ?? 0) + remoteBalls;
+  const outs = Number(batting.outs ?? 0) + remoteOuts;
+  const runsConceded = Number(bowling.runs_conceded ?? 0) + remoteConceded;
+  const bowlingBalls = Number(bowling.balls ?? 0) + remoteBowlingBalls;
+  const wickets = Number(bowling.wickets ?? 0) + remoteWickets;
+  return {
+    ...local,
+    matches: Number(local.matches ?? 0) + remoteMatches,
+    batting: { ...batting, runs, balls, outs, six_count: Number(batting.six_count ?? 0) + remoteSixes, average: outs > 0 ? Number((runs / outs).toFixed(2)) : null, strike_rate: balls > 0 ? Number((runs * 100 / balls).toFixed(2)) : null },
+    bowling: { ...bowling, runs_conceded: runsConceded, balls: bowlingBalls, wickets, economy: bowlingBalls > 0 ? Number((runsConceded * 6 / bowlingBalls).toFixed(2)) : null, average: wickets > 0 ? Number((runsConceded / wickets).toFixed(2)) : null },
+  };
+}
+
 async function handlePlayerStats(supabase: AdminClient, playerName: string, url: URL): Promise<Response> {
   const parsed = parseMatchFilters(url);
   if ("error" in parsed) return errorResponse(parsed.error, 400);
-
-  const { data, error } = await supabase.rpc("player_career_stats", {
-    p_name: playerName,
-    p_match_id: parsed.matchId,
-    p_format: parsed.format,
-    p_season: parsed.season,
-    p_team: parsed.team,
-    p_date_from: parsed.dateFrom,
-    p_date_to: parsed.dateTo,
-  });
+  const { data, error } = await supabase.rpc("player_career_stats", { p_name: playerName, p_match_id: parsed.matchId, p_format: parsed.format, p_season: parsed.season, p_team: parsed.team, p_date_from: parsed.dateFrom, p_date_to: parsed.dateTo });
   if (error) throw new Error(error.message);
-
-  const stats = data ?? {};
-  return json({ filters: filtersObject(playerName, parsed), stats });
+  const localStats = (data ?? {}) as Record<string, any>;
+  const localMatches = Number(localStats.matches ?? 0);
+  const latestDate = localMatches > 0 ? null : await latestLocalMatchDate(supabase, parsed);
+  const rows = await fetchTigzigRows(supabase, remoteStatsSql(playerName, parsed, latestDate));
+  return json({ filters: filtersObject(playerName, parsed), stats: mergeRemoteStats(localStats, rows[0]) });
 }
 
 async function handlePlayerMatches(supabase: AdminClient, playerName: string, url: URL): Promise<Response> {
   const parsed = parseMatchFilters(url);
   if ("error" in parsed) return errorResponse(parsed.error, 400);
-
-  const { data, error } = await supabase.rpc("player_matches", {
-    p_name: playerName,
-    p_match_id: parsed.matchId,
-    p_format: parsed.format,
-    p_season: parsed.season,
-    p_team: parsed.team,
-    p_date_from: parsed.dateFrom,
-    p_date_to: parsed.dateTo,
-  });
+  const { data, error } = await supabase.rpc("player_matches", { p_name: playerName, p_match_id: parsed.matchId, p_format: parsed.format, p_season: parsed.season, p_team: parsed.team, p_date_from: parsed.dateFrom, p_date_to: parsed.dateTo });
   if (error) throw new Error(error.message);
-  return json({ filters: filtersObject(playerName, parsed), matches: data ?? [] });
+  const localRows = (data ?? []) as unknown[];
+  const latestDate = latestDateFromRows(localRows);
+  const remoteRows = await fetchTigzigRows(supabase, remoteMatchSql(parsed, latestDate, playerName));
+  return json({ filters: filtersObject(playerName, parsed), matches: mergeRemoteMatches(localRows, remoteRows) });
 }
 
 async function handlePlayerMatchBalls(supabase: AdminClient, playerName: string, matchId: string, url: URL): Promise<Response> {
