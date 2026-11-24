@@ -233,7 +233,7 @@ function remoteMatchSql(filters: MatchFilters, latestDate: string | null, player
   const conditions = [`m.start_date > ${sqlDate(latestDate)}`];
   if (playerName) {
     const name = sqlText(playerName);
-    conditions.push(`EXISTS (SELECT 1 FROM ball_by_ball b WHERE b.match_id = m.match_id AND (lower(b.striker) = lower(${name}) OR lower(b.non_striker) = lower(${name}) OR lower(b.bowler) = lower(${name}) OR lower(b.player_dismissed) = lower(${name}) OR lower(b.fielder) LIKE '%' || ${name} || '%'))`);
+    conditions.push(`EXISTS (SELECT 1 FROM ball_by_ball b WHERE b.match_id = m.match_id AND (lower(b.striker) = lower(${name}) OR lower(b.non_striker) = lower(${name}) OR lower(b.bowler) = lower(${name}) OR lower(b.player_dismissed) = lower(${name}) OR lower(b.fielder) LIKE '%' || lower(${name}) || '%'))`);
   }
   if (filters.matchId) conditions.push(`m.match_id = ${sqlText(filters.matchId)}`);
   if (filters.format) conditions.push(`m.match_type = ${sqlText(filters.format === "Test" ? "TEST" : filters.format)}`);
@@ -375,13 +375,13 @@ function latestDateFromRows(rows: unknown[]): string | null {
 
 function remoteStatsSql(playerName: string, filters: MatchFilters, latestDate: string | null): string {
   const name = sqlText(playerName);
-  const conditions = [`m.start_date > ${sqlDate(latestDate)}`, `(lower(b.striker) = lower(${name}) OR lower(b.non_striker) = lower(${name}) OR lower(b.bowler) = lower(${name}) OR lower(b.player_dismissed) = lower(${name}) OR lower(b.fielder) LIKE '%' || ${name} || '%')`];
+  const conditions = [`m.start_date > ${sqlDate(latestDate)}`, `(lower(b.striker) = lower(${name}) OR lower(b.non_striker) = lower(${name}) OR lower(b.bowler) = lower(${name}) OR lower(b.player_dismissed) = lower(${name}) OR lower(b.fielder) LIKE '%' || lower(${name}) || '%')`];
   if (filters.format) conditions.push(`m.match_type = ${sqlText(filters.format === "Test" ? "TEST" : filters.format)}`);
   if (filters.season) conditions.push(`m.season = ${sqlText(filters.season)}`);
   if (filters.team) conditions.push(`(m.team1 ILIKE '%' || ${sqlText(filters.team)} || '%' OR m.team2 ILIKE '%' || ${sqlText(filters.team)} || '%')`);
   if (filters.dateFrom) conditions.push(`m.start_date >= ${sqlDate(filters.dateFrom)}`);
   if (filters.dateTo) conditions.push(`m.start_date <= ${sqlDate(filters.dateTo)}`);
-  return `SELECT count(DISTINCT b.match_id) AS matches, COALESCE(sum(CASE WHEN lower(b.striker) = lower(${name}) THEN b.runs_off_bat ELSE 0 END), 0) AS runs, count(*) FILTER (WHERE lower(b.striker) = lower(${name})) AS balls, count(*) FILTER (WHERE lower(b.striker) = lower(${name}) AND b.player_dismissed IS NOT NULL) AS outs, count(*) FILTER (WHERE lower(b.striker) = lower(${name}) AND b.runs_off_bat = 6) AS six_count, COALESCE(sum(CASE WHEN lower(b.bowler) = lower(${name}) THEN b.total_runs ELSE 0 END), 0) AS runs_conceded, count(*) FILTER (WHERE lower(b.bowler) = lower(${name})) AS bowling_balls, count(*) FILTER (WHERE lower(b.bowler) = lower(${name}) AND b.wicket_type IS NOT NULL) AS wickets FROM ball_by_ball b JOIN match_info m ON m.match_id = b.match_id WHERE ${conditions.join(" AND ")}`;
+  return `SELECT count(DISTINCT b.match_id) AS matches, COALESCE(sum(CASE WHEN lower(b.striker) = lower(${name}) THEN b.runs_off_bat ELSE 0 END), 0) AS runs, count(*) FILTER (WHERE lower(b.striker) = lower(${name})) AS balls, count(*) FILTER (WHERE lower(b.player_dismissed) = lower(${name})) AS outs, count(*) FILTER (WHERE lower(b.striker) = lower(${name}) AND b.runs_off_bat = 6) AS six_count, COALESCE(sum(CASE WHEN lower(b.bowler) = lower(${name}) THEN b.total_runs ELSE 0 END), 0) AS runs_conceded, count(*) FILTER (WHERE lower(b.bowler) = lower(${name})) AS bowling_balls, count(*) FILTER (WHERE lower(b.bowler) = lower(${name}) AND b.wicket_type IS NOT NULL) AS wickets FROM ball_by_ball b JOIN match_info m ON m.match_id = b.match_id WHERE ${conditions.join(" AND ")}`;
 }
 
 function mergeRemoteStats(local: Record<string, any>, remote: TigzigRow | undefined): Record<string, unknown> {
@@ -416,8 +416,7 @@ async function handlePlayerStats(supabase: AdminClient, playerName: string, url:
   const { data, error } = await supabase.rpc("player_career_stats", { p_name: playerName, p_match_id: parsed.matchId, p_format: parsed.format, p_season: parsed.season, p_team: parsed.team, p_date_from: parsed.dateFrom, p_date_to: parsed.dateTo });
   if (error) throw new Error(error.message);
   const localStats = (data ?? {}) as Record<string, any>;
-  const localMatches = Number(localStats.matches ?? 0);
-  const latestDate = localMatches > 0 ? null : await latestLocalMatchDate(supabase, parsed);
+  const latestDate = await latestLocalMatchDate(supabase, parsed);
   const rows = await fetchTigzigRows(supabase, remoteStatsSql(playerName, parsed, latestDate));
   return json({ filters: filtersObject(playerName, parsed), stats: mergeRemoteStats(localStats, rows[0]) });
 }

@@ -2,7 +2,7 @@
   "projectId": "71312633",
   "functions": {
     "ball-by-ball-api": {
-      "hasChanged": false,
+      "hasChanged": true,
       "hash": "e06ece8cee1f921cabb4e7dc8709589cfe3f99dab7f506b5809cc6a82a0aa78e"
     },
     "csv-import": {
