@@ -221,7 +221,7 @@ function remoteMatch(row: TigzigRow): Record<string, unknown> | null {
     toss_decision: row.toss_decision ?? null,
     result: row.winner ?? null,
     result_margin: row.winner_runs ? `${row.winner_runs} runs` : row.winner_wickets ? `${row.winner_wickets} wickets` : null,
-    player_of_match: row.player_of_match ?? null,
+    player_of_match: row.player_of_match1 ?? row.player_of_match ?? null,
     venue: row.venue ?? null,
     umpire1: row.umpire1 ?? null,
     umpire2: row.umpire2 ?? null,
@@ -242,7 +242,7 @@ function remoteMatchSql(filters: MatchFilters, latestDate: string | null, player
   if (filters.dateFrom) conditions.push(`m.start_date >= ${sqlDate(filters.dateFrom)}`);
   if (filters.dateTo) conditions.push(`m.start_date <= ${sqlDate(filters.dateTo)}`);
   if (filters.search) conditions.push(`(m.match_id::text ILIKE '%' || ${sqlText(filters.search)} || '%' OR m.team1 ILIKE '%' || ${sqlText(filters.search)} || '%' OR m.team2 ILIKE '%' || ${sqlText(filters.search)} || '%' OR m.venue ILIKE '%' || ${sqlText(filters.search)} || '%' OR m.city ILIKE '%' || ${sqlText(filters.search)} || '%')`);
-  return `SELECT m.match_id, m.match_type, m.team1, m.team2, m.season, m.start_date, m.venue, m.city, m.toss_winner, m.toss_decision, m.winner, m.winner_runs, m.winner_wickets, m.player_of_match, m.umpire1, m.umpire2 FROM match_info m WHERE ${conditions.join(" AND ")} ORDER BY m.start_date DESC LIMIT 1000`;
+  return `SELECT m.match_id, m.match_type, m.team1, m.team2, m.season, m.start_date, m.venue, m.city, m.toss_winner, m.toss_decision, m.winner, m.winner_runs, m.winner_wickets, m.player_of_match1, m.umpire1, m.umpire2 FROM match_info m WHERE ${conditions.join(" AND ")} ORDER BY m.start_date DESC LIMIT 1000`;
 }
 
 async function latestLocalMatchDate(supabase: AdminClient, filters: MatchFilters): Promise<string | null> {
@@ -379,6 +379,15 @@ function remoteStatsSql(playerName: string, matchIds: string[]): string {
   return `SELECT count(DISTINCT b.match_id) AS matches, COALESCE(sum(CASE WHEN lower(b.striker) = ${nameLower} THEN b.runs_off_bat ELSE 0 END), 0) AS runs, count(*) FILTER (WHERE lower(b.striker) = ${nameLower}) AS balls, count(*) FILTER (WHERE lower(b.player_dismissed) = ${nameLower}) AS outs, count(*) FILTER (WHERE lower(b.striker) = ${nameLower} AND b.runs_off_bat = 6) AS six_count, COALESCE(sum(CASE WHEN lower(b.bowler) = ${nameLower} THEN b.runs_off_bat + COALESCE(b.extras, 0) ELSE 0 END), 0) AS runs_conceded, count(*) FILTER (WHERE lower(b.bowler) = ${nameLower}) AS bowling_balls, count(*) FILTER (WHERE lower(b.bowler) = ${nameLower} AND b.wicket_type IS NOT NULL) AS wickets FROM ball_by_ball b WHERE b.match_id IN (${idList})`;
 }
 
+function emptyPlayerStats(playerName: string): Record<string, unknown> {
+  return {
+    player: playerName,
+    matches: 0,
+    batting: { runs: 0, balls: 0, outs: 0, six_count: 0, average: null, strike_rate: null },
+    bowling: { runs_conceded: 0, balls: 0, wickets: 0, economy: null, average: null },
+  };
+}
+
 function mergeRemoteStats(local: Record<string, any>, remote: TigzigRow | undefined): Record<string, unknown> {
   if (!remote) return local;
   const remoteMatches = Number(remote.matches ?? 0);
@@ -409,8 +418,8 @@ async function handlePlayerStats(supabase: AdminClient, playerName: string, url:
   const parsed = parseMatchFilters(url);
   if ("error" in parsed) return errorResponse(parsed.error, 400);
   const { data, error } = await supabase.rpc("player_career_stats", { p_name: playerName, p_match_id: parsed.matchId, p_format: parsed.format, p_season: parsed.season, p_team: parsed.team, p_date_from: parsed.dateFrom, p_date_to: parsed.dateTo });
-  if (error) throw new Error(error.message);
-  const localStats = (data ?? {}) as Record<string, any>;
+  if (error) console.warn("Local player stats unavailable", error.message);
+  const localStats = (error ? emptyPlayerStats(playerName) : data ?? emptyPlayerStats(playerName)) as Record<string, any>;
   const latestDate = await latestLocalMatchDate(supabase, parsed);
   const remoteMatchRows = await fetchTigzigRows(supabase, remoteMatchSql(parsed, latestDate, playerName));
   const remoteMatchIds = remoteMatchRows
@@ -427,8 +436,8 @@ async function handlePlayerMatches(supabase: AdminClient, playerName: string, ur
   const parsed = parseMatchFilters(url);
   if ("error" in parsed) return errorResponse(parsed.error, 400);
   const { data, error } = await supabase.rpc("player_matches", { p_name: playerName, p_match_id: parsed.matchId, p_format: parsed.format, p_season: parsed.season, p_team: parsed.team, p_date_from: parsed.dateFrom, p_date_to: parsed.dateTo });
-  if (error) throw new Error(error.message);
-  const localRows = (data ?? []) as unknown[];
+  if (error) console.warn("Local player matches unavailable", error.message);
+  const localRows = (error ? [] : data ?? []) as unknown[];
   const latestDate = latestDateFromRows(localRows);
   const remoteRows = await fetchTigzigRows(supabase, remoteMatchSql(parsed, latestDate, playerName));
   return json({ filters: filtersObject(playerName, parsed), matches: mergeRemoteMatches(localRows, remoteRows) });
