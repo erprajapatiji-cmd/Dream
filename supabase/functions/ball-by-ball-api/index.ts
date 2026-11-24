@@ -229,12 +229,8 @@ function remoteMatch(row: TigzigRow): Record<string, unknown> | null {
   };
 }
 
-function remoteMatchSql(filters: MatchFilters, latestDate: string | null, playerName?: string): string {
+function remoteMatchSql(filters: MatchFilters, latestDate: string | null): string {
   const conditions = [`m.start_date > ${sqlDate(latestDate)}`];
-  if (playerName) {
-    const nameLower = sqlText(playerName.toLowerCase());
-    conditions.push(`EXISTS (SELECT 1 FROM ball_by_ball b WHERE b.match_id = m.match_id AND (lower(b.striker) = ${nameLower} OR lower(b.non_striker) = ${nameLower} OR lower(b.bowler) = ${nameLower}))`);
-  }
   if (filters.matchId) conditions.push(`m.match_id::text = ${sqlText(filters.matchId)}`);
   if (filters.format) conditions.push(`m.match_type = ${sqlText(filters.format === "Test" ? "TEST" : filters.format)}`);
   if (filters.season) conditions.push(`m.season = ${sqlText(filters.season)}`);
@@ -373,6 +369,12 @@ function latestDateFromRows(rows: unknown[]): string | null {
   return dates.at(-1) ?? null;
 }
 
+function remotePlayerMatchIdsSql(playerName: string, matchIds: string[]): string {
+  const nameLower = sqlText(playerName.toLowerCase());
+  const idList = matchIds.join(", ");
+  return `SELECT DISTINCT b.match_id FROM ball_by_ball b WHERE b.match_id IN (${idList}) AND (lower(b.striker) = ${nameLower} OR lower(b.non_striker) = ${nameLower} OR lower(b.bowler) = ${nameLower})`;
+}
+
 function remoteStatsSql(playerName: string, matchIds: string[]): string {
   const nameLower = sqlText(playerName.toLowerCase());
   const idList = matchIds.join(", ");
@@ -421,8 +423,15 @@ async function handlePlayerStats(supabase: AdminClient, playerName: string, url:
   if (error) console.warn("Local player stats unavailable", error.message);
   const localStats = (error ? emptyPlayerStats(playerName) : data ?? emptyPlayerStats(playerName)) as Record<string, any>;
   const latestDate = await latestLocalMatchDate(supabase, parsed);
-  const remoteMatchRows = await fetchTigzigRows(supabase, remoteMatchSql(parsed, latestDate, playerName));
-  const remoteMatchIds = remoteMatchRows
+  const candidateRows = await fetchTigzigRows(supabase, remoteMatchSql(parsed, latestDate));
+  const candidateIds = candidateRows
+    .map((row) => String(row.match_id ?? ""))
+    .filter((matchId) => /^\d+$/.test(matchId));
+  if (candidateIds.length === 0) {
+    return json({ filters: filtersObject(playerName, parsed), stats: localStats });
+  }
+  const playerIdRows = await fetchTigzigRows(supabase, remotePlayerMatchIdsSql(playerName, candidateIds));
+  const remoteMatchIds = playerIdRows
     .map((row) => String(row.match_id ?? ""))
     .filter((matchId) => /^\d+$/.test(matchId));
   if (remoteMatchIds.length === 0) {
@@ -439,7 +448,16 @@ async function handlePlayerMatches(supabase: AdminClient, playerName: string, ur
   if (error) console.warn("Local player matches unavailable", error.message);
   const localRows = (error ? [] : data ?? []) as unknown[];
   const latestDate = latestDateFromRows(localRows);
-  const remoteRows = await fetchTigzigRows(supabase, remoteMatchSql(parsed, latestDate, playerName));
+  const candidateRows = await fetchTigzigRows(supabase, remoteMatchSql(parsed, latestDate));
+  const candidateIds = candidateRows
+    .map((row) => String(row.match_id ?? ""))
+    .filter((matchId) => /^\d+$/.test(matchId));
+  if (candidateIds.length === 0) {
+    return json({ filters: filtersObject(playerName, parsed), matches: localRows });
+  }
+  const playerIdRows = await fetchTigzigRows(supabase, remotePlayerMatchIdsSql(playerName, candidateIds));
+  const playerIds = new Set(playerIdRows.map((row) => String(row.match_id ?? "")));
+  const remoteRows = candidateRows.filter((row) => playerIds.has(String(row.match_id ?? "")));
   return json({ filters: filtersObject(playerName, parsed), matches: mergeRemoteMatches(localRows, remoteRows) });
 }
 
