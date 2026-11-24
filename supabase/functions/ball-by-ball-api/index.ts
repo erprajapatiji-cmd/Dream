@@ -120,7 +120,7 @@ function applyMatchFilters(query: SupabaseQuery, filters: MatchFilters): Supabas
 }
 
 const MATCH_COLUMNS = "id, match_id, match_format, season, city, date, team1, team2, toss_winner, toss_decision, result, result_margin, player_of_match, venue, umpire1, umpire2, created_at";
-const TIGZIG_URL = "https://tigzig.com";
+const TIGZIG_URL = "https://db-mcp.tigzig.com/v1/query/postgres";
 const TIGZIG_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const TIGZIG_TIMEOUT_MS = 10000;
 
@@ -238,10 +238,10 @@ function remoteMatchSql(filters: MatchFilters, latestDate: string | null, player
   if (filters.matchId) conditions.push(`m.match_id = ${sqlText(filters.matchId)}`);
   if (filters.format) conditions.push(`m.match_type = ${sqlText(filters.format === "Test" ? "TEST" : filters.format)}`);
   if (filters.season) conditions.push(`m.season = ${sqlText(filters.season)}`);
-  if (filters.team) conditions.push(`(${sqlText(filters.team)} ILIKE '%' || m.team1 || '%' OR ${sqlText(filters.team)} ILIKE '%' || m.team2 || '%')`);
+  if (filters.team) conditions.push(`(m.team1 ILIKE '%' || ${sqlText(filters.team)} || '%' OR m.team2 ILIKE '%' || ${sqlText(filters.team)} || '%')`);
   if (filters.dateFrom) conditions.push(`m.start_date >= ${sqlDate(filters.dateFrom)}`);
   if (filters.dateTo) conditions.push(`m.start_date <= ${sqlDate(filters.dateTo)}`);
-  if (filters.search) conditions.push(`(${sqlText(filters.search)} ILIKE '%' || m.match_id || '%' OR ${sqlText(filters.search)} ILIKE '%' || m.team1 || '%' OR ${sqlText(filters.search)} ILIKE '%' || m.team2 || '%' OR ${sqlText(filters.search)} ILIKE '%' || m.venue || '%' OR ${sqlText(filters.search)} ILIKE '%' || m.city || '%')`);
+  if (filters.search) conditions.push(`(m.match_id ILIKE '%' || ${sqlText(filters.search)} || '%' OR m.team1 ILIKE '%' || ${sqlText(filters.search)} || '%' OR m.team2 ILIKE '%' || ${sqlText(filters.search)} || '%' OR m.venue ILIKE '%' || ${sqlText(filters.search)} || '%' OR m.city ILIKE '%' || ${sqlText(filters.search)} || '%')`);
   return `SELECT m.match_id, m.match_type, m.team1, m.team2, m.season, m.start_date, m.venue, m.city, m.toss_winner, m.toss_decision, m.winner, m.winner_runs, m.winner_wickets, m.player_of_match, m.umpire1, m.umpire2 FROM match_info m WHERE ${conditions.join(" AND ")} ORDER BY m.start_date DESC LIMIT 1000`;
 }
 
@@ -378,7 +378,7 @@ function remoteStatsSql(playerName: string, filters: MatchFilters, latestDate: s
   const conditions = [`m.start_date > ${sqlDate(latestDate)}`, `(lower(b.striker) = lower(${name}) OR lower(b.non_striker) = lower(${name}) OR lower(b.bowler) = lower(${name}) OR lower(b.player_dismissed) = lower(${name}) OR lower(b.fielder) LIKE '%' || ${name} || '%')`];
   if (filters.format) conditions.push(`m.match_type = ${sqlText(filters.format === "Test" ? "TEST" : filters.format)}`);
   if (filters.season) conditions.push(`m.season = ${sqlText(filters.season)}`);
-  if (filters.team) conditions.push(`(${sqlText(filters.team)} ILIKE '%' || m.team1 || '%' OR ${sqlText(filters.team)} ILIKE '%' || m.team2 || '%')`);
+  if (filters.team) conditions.push(`(m.team1 ILIKE '%' || ${sqlText(filters.team)} || '%' OR m.team2 ILIKE '%' || ${sqlText(filters.team)} || '%')`);
   if (filters.dateFrom) conditions.push(`m.start_date >= ${sqlDate(filters.dateFrom)}`);
   if (filters.dateTo) conditions.push(`m.start_date <= ${sqlDate(filters.dateTo)}`);
   return `SELECT count(DISTINCT b.match_id) AS matches, COALESCE(sum(CASE WHEN lower(b.striker) = lower(${name}) THEN b.runs_off_bat ELSE 0 END), 0) AS runs, count(*) FILTER (WHERE lower(b.striker) = lower(${name})) AS balls, count(*) FILTER (WHERE lower(b.striker) = lower(${name}) AND b.player_dismissed IS NOT NULL) AS outs, count(*) FILTER (WHERE lower(b.striker) = lower(${name}) AND b.runs_off_bat = 6) AS six_count, COALESCE(sum(CASE WHEN lower(b.bowler) = lower(${name}) THEN b.total_runs ELSE 0 END), 0) AS runs_conceded, count(*) FILTER (WHERE lower(b.bowler) = lower(${name})) AS bowling_balls, count(*) FILTER (WHERE lower(b.bowler) = lower(${name}) AND b.wicket_type IS NOT NULL) AS wickets FROM ball_by_ball b JOIN match_info m ON m.match_id = b.match_id WHERE ${conditions.join(" AND ")}`;
