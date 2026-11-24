@@ -232,16 +232,16 @@ function remoteMatch(row: TigzigRow): Record<string, unknown> | null {
 function remoteMatchSql(filters: MatchFilters, latestDate: string | null, playerName?: string): string {
   const conditions = [`m.start_date > ${sqlDate(latestDate)}`];
   if (playerName) {
-    const name = sqlText(playerName);
-    conditions.push(`EXISTS (SELECT 1 FROM ball_by_ball b WHERE b.match_id = m.match_id AND (lower(b.striker) = lower(${name}) OR lower(b.non_striker) = lower(${name}) OR lower(b.bowler) = lower(${name}) OR lower(b.player_dismissed) = lower(${name}) OR lower(b.fielder) LIKE '%' || lower(${name}) || '%'))`);
+    const nameLower = sqlText(playerName.toLowerCase());
+    conditions.push(`EXISTS (SELECT 1 FROM ball_by_ball b WHERE b.match_id = m.match_id AND (lower(b.striker) = ${nameLower} OR lower(b.non_striker) = ${nameLower} OR lower(b.bowler) = ${nameLower} OR lower(b.player_dismissed) = ${nameLower} OR lower(b.fielder_1) = ${nameLower} OR lower(b.fielder_2) = ${nameLower} OR lower(b.fielder_3) = ${nameLower}))`);
   }
-  if (filters.matchId) conditions.push(`m.match_id = ${sqlText(filters.matchId)}`);
+  if (filters.matchId) conditions.push(`m.match_id::text = ${sqlText(filters.matchId)}`);
   if (filters.format) conditions.push(`m.match_type = ${sqlText(filters.format === "Test" ? "TEST" : filters.format)}`);
   if (filters.season) conditions.push(`m.season = ${sqlText(filters.season)}`);
   if (filters.team) conditions.push(`(m.team1 ILIKE '%' || ${sqlText(filters.team)} || '%' OR m.team2 ILIKE '%' || ${sqlText(filters.team)} || '%')`);
   if (filters.dateFrom) conditions.push(`m.start_date >= ${sqlDate(filters.dateFrom)}`);
   if (filters.dateTo) conditions.push(`m.start_date <= ${sqlDate(filters.dateTo)}`);
-  if (filters.search) conditions.push(`(m.match_id ILIKE '%' || ${sqlText(filters.search)} || '%' OR m.team1 ILIKE '%' || ${sqlText(filters.search)} || '%' OR m.team2 ILIKE '%' || ${sqlText(filters.search)} || '%' OR m.venue ILIKE '%' || ${sqlText(filters.search)} || '%' OR m.city ILIKE '%' || ${sqlText(filters.search)} || '%')`);
+  if (filters.search) conditions.push(`(m.match_id::text ILIKE '%' || ${sqlText(filters.search)} || '%' OR m.team1 ILIKE '%' || ${sqlText(filters.search)} || '%' OR m.team2 ILIKE '%' || ${sqlText(filters.search)} || '%' OR m.venue ILIKE '%' || ${sqlText(filters.search)} || '%' OR m.city ILIKE '%' || ${sqlText(filters.search)} || '%')`);
   return `SELECT m.match_id, m.match_type, m.team1, m.team2, m.season, m.start_date, m.venue, m.city, m.toss_winner, m.toss_decision, m.winner, m.winner_runs, m.winner_wickets, m.player_of_match, m.umpire1, m.umpire2 FROM match_info m WHERE ${conditions.join(" AND ")} ORDER BY m.start_date DESC LIMIT 1000`;
 }
 
@@ -374,14 +374,14 @@ function latestDateFromRows(rows: unknown[]): string | null {
 }
 
 function remoteStatsSql(playerName: string, filters: MatchFilters, latestDate: string | null): string {
-  const name = sqlText(playerName);
-  const conditions = [`m.start_date > ${sqlDate(latestDate)}`, `(lower(b.striker) = lower(${name}) OR lower(b.non_striker) = lower(${name}) OR lower(b.bowler) = lower(${name}) OR lower(b.player_dismissed) = lower(${name}) OR lower(b.fielder) LIKE '%' || lower(${name}) || '%')`];
+  const nameLower = sqlText(playerName.toLowerCase());
+  const conditions = [`m.start_date > ${sqlDate(latestDate)}`, `(lower(b.striker) = ${nameLower} OR lower(b.non_striker) = ${nameLower} OR lower(b.bowler) = ${nameLower} OR lower(b.player_dismissed) = ${nameLower} OR lower(b.fielder_1) = ${nameLower} OR lower(b.fielder_2) = ${nameLower} OR lower(b.fielder_3) = ${nameLower})`];
   if (filters.format) conditions.push(`m.match_type = ${sqlText(filters.format === "Test" ? "TEST" : filters.format)}`);
   if (filters.season) conditions.push(`m.season = ${sqlText(filters.season)}`);
   if (filters.team) conditions.push(`(m.team1 ILIKE '%' || ${sqlText(filters.team)} || '%' OR m.team2 ILIKE '%' || ${sqlText(filters.team)} || '%')`);
   if (filters.dateFrom) conditions.push(`m.start_date >= ${sqlDate(filters.dateFrom)}`);
   if (filters.dateTo) conditions.push(`m.start_date <= ${sqlDate(filters.dateTo)}`);
-  return `SELECT count(DISTINCT b.match_id) AS matches, COALESCE(sum(CASE WHEN lower(b.striker) = lower(${name}) THEN b.runs_off_bat ELSE 0 END), 0) AS runs, count(*) FILTER (WHERE lower(b.striker) = lower(${name})) AS balls, count(*) FILTER (WHERE lower(b.player_dismissed) = lower(${name})) AS outs, count(*) FILTER (WHERE lower(b.striker) = lower(${name}) AND b.runs_off_bat = 6) AS six_count, COALESCE(sum(CASE WHEN lower(b.bowler) = lower(${name}) THEN b.total_runs ELSE 0 END), 0) AS runs_conceded, count(*) FILTER (WHERE lower(b.bowler) = lower(${name})) AS bowling_balls, count(*) FILTER (WHERE lower(b.bowler) = lower(${name}) AND b.wicket_type IS NOT NULL) AS wickets FROM ball_by_ball b JOIN match_info m ON m.match_id = b.match_id WHERE ${conditions.join(" AND ")}`;
+  return `SELECT count(DISTINCT b.match_id) AS matches, COALESCE(sum(CASE WHEN lower(b.striker) = ${nameLower} THEN b.runs_off_bat ELSE 0 END), 0) AS runs, count(*) FILTER (WHERE lower(b.striker) = ${nameLower}) AS balls, count(*) FILTER (WHERE lower(b.player_dismissed) = ${nameLower}) AS outs, count(*) FILTER (WHERE lower(b.striker) = ${nameLower} AND b.runs_off_bat = 6) AS six_count, COALESCE(sum(CASE WHEN lower(b.bowler) = ${nameLower} THEN (b.runs_off_bat + COALESCE(b.extras, 0) + COALESCE(b.wides, 0) + COALESCE(b.noballs, 0) + COALESCE(b.byes, 0) + COALESCE(b.legbyes, 0) + COALESCE(b.penalty, 0)) ELSE 0 END), 0) AS runs_conceded, count(*) FILTER (WHERE lower(b.bowler) = ${nameLower}) AS bowling_balls, count(*) FILTER (WHERE lower(b.bowler) = ${nameLower} AND b.wicket_type IS NOT NULL AND lower(b.player_dismissed) != ${nameLower}) AS wickets FROM ball_by_ball b JOIN match_info m ON m.match_id = b.match_id WHERE ${conditions.join(" AND ")}`;
 }
 
 function mergeRemoteStats(local: Record<string, any>, remote: TigzigRow | undefined): Record<string, unknown> {
