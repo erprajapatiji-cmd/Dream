@@ -2,7 +2,7 @@
 verify_jwt = false
 
 [functions.csv-import]
-verify_jwt = false
+verify_jwt = true
 
-[functions.source-code]
-verify_jwt = false
+[functions.admin-api-keys]
+verify_jwt = true

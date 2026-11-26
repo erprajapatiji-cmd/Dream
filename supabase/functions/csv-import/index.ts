@@ -1,6 +1,7 @@
 // Server-side bulk CSV import.
 // Runs with the service role key (bypasses RLS), does batched upserts,
 // and returns the exact count of rows actually committed to the database.
+// Requires JWT verification (verify_jwt = true in config.toml).
 
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 
@@ -9,6 +10,23 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
+
+type AdminClient = ReturnType<typeof createClient>;
+
+async function verifyUser(req: Request): Promise<boolean> {
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader?.startsWith("Bearer ")) return false;
+  const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+  if (!token || token.length < 20) return false;
+  const supabaseUrl = Deno.env.get("SUPABASE_URL");
+  const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
+  if (!supabaseUrl || !anonKey) return false;
+  const client = createClient(supabaseUrl, anonKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data: { user }, error } = await client.auth.getUser(token);
+  return !error && Boolean(user);
+}
 
 interface MatchRecord {
   match_id: string;
@@ -103,6 +121,14 @@ Deno.serve(async (req: Request) => {
   } catch {
     return new Response(JSON.stringify({ error: "Invalid JSON in request body" }), {
       status: 400,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
+  // Verify JWT before any database operation
+  if (!(await verifyUser(req))) {
+    return new Response(JSON.stringify({ error: "Authentication required" }), {
+      status: 401,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
