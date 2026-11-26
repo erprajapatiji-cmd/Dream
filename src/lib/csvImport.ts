@@ -1,4 +1,5 @@
 import { getField, type ParsedMatchRow } from "@/lib/csv";
+import { supabase } from "./supabase";
 
 export interface CsvImportResult {
   matches: number;
@@ -200,13 +201,17 @@ async function postImport(
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), EDGE_FUNCTION_TIMEOUT_MS);
       const startTime = performance.now();
+      // Get the user's auth token so the edge function can verify JWT
+      const { data: { session } } = await supabase.auth.getSession();
+      const authToken = session?.access_token;
+      if (!authToken) throw new Error("Authentication required. Please sign in to import data.");
       const response = await fetch(
         `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/csv-import`,
         {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+            Authorization: `Bearer ${authToken}`,
           },
           body: JSON.stringify(payload),
           signal: controller.signal,
