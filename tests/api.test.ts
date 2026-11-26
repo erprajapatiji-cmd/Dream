@@ -297,11 +297,15 @@ describe("429 Retry-After", () => {
   });
 
   it("identifies 5xx as retryable", () => {
-    expect(503 === 429 || (503 >= 500 && 503 < 600)).toBe(true);
+    const status = 503;
+    const isRetryable = status === 429 || (status >= 500 && status < 600);
+    expect(isRetryable).toBe(true);
   });
 
   it("identifies 404 as NOT retryable", () => {
-    expect(404 === 429 || (404 >= 500 && 404 < 600)).toBe(false);
+    const status = 404;
+    const isRetryable = status === 429 || (status >= 500 && status < 600);
+    expect(isRetryable).toBe(false);
   });
 });
 

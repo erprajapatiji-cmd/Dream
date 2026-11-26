@@ -11,8 +11,6 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
 
-type AdminClient = ReturnType<typeof createClient>;
-
 async function verifyUser(req: Request): Promise<boolean> {
   const authHeader = req.headers.get("Authorization");
   if (!authHeader?.startsWith("Bearer ")) return false;
