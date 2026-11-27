@@ -34,6 +34,8 @@ async function hashKey(key: string): Promise<string> {
 
 type AdminClient = ReturnType<typeof createClient>;
 
+const ALLOWED_EMAIL = "erprajapatiji@gmail.com";
+
 async function getUserFromJwt(req: Request, supabase: AdminClient): Promise<{ id: string; email: string } | null> {
   const authHeader = req.headers.get("Authorization");
   if (!authHeader?.startsWith("Bearer ")) return null;
@@ -62,6 +64,9 @@ Deno.serve(async (req: Request) => {
   const user = await getUserFromJwt(req, authClient);
   if (!user) {
     return errorResponse("Authentication required", 401);
+  }
+  if (user.email.toLowerCase() !== ALLOWED_EMAIL) {
+    return errorResponse("Access denied", 403);
   }
 
   // Service role client for api_keys table access

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
-import { Key, Plus, Trash2, Copy, Check, AlertCircle, Loader2, ArrowLeft, Power } from "lucide-react";
+import { Key, Plus, Trash2, Copy, Check, AlertCircle, Loader2, ArrowLeft, Power, LogOut } from "lucide-react";
 import { listApiKeys, generateApiKey, toggleApiKey, deleteApiKey } from "@/lib/apiKeys";
+import { supabase } from "@/lib/supabase";
 import type { ApiKey } from "@/lib/types";
 
 interface SettingsPageProps {
@@ -79,12 +80,21 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <div className="mx-auto max-w-3xl px-4 py-8 sm:px-6 lg:px-8">
-        <button
-          onClick={() => onNavigate("matches")}
-          className="mb-6 inline-flex items-center gap-2 text-sm text-slate-400 hover:text-slate-200 transition-colors"
-        >
-          <ArrowLeft size={16} /> Back to Matches
-        </button>
+        <div className="mb-6 flex items-center justify-between">
+          <button
+            onClick={() => onNavigate("matches")}
+            className="inline-flex items-center gap-2 text-sm text-slate-400 hover:text-slate-200 transition-colors"
+          >
+            <ArrowLeft size={16} /> Back to Matches
+          </button>
+          <button
+            onClick={async () => { await supabase.auth.signOut(); }}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-700 px-3 py-2 text-sm font-medium text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors"
+          >
+            <LogOut size={16} />
+            <span>Sign Out</span>
+          </button>
+        </div>
 
         <div className="flex items-center justify-between">
           <div>

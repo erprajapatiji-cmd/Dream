@@ -11,6 +11,8 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
 
+const ALLOWED_EMAIL = "erprajapatiji@gmail.com";
+
 async function verifyUser(req: Request): Promise<boolean> {
   const authHeader = req.headers.get("Authorization");
   if (!authHeader?.startsWith("Bearer ")) return false;
@@ -23,7 +25,9 @@ async function verifyUser(req: Request): Promise<boolean> {
     auth: { persistSession: false, autoRefreshToken: false },
   });
   const { data: { user }, error } = await client.auth.getUser(token);
-  return !error && Boolean(user);
+  if (error || !user) return false;
+  const email = user.email ?? "";
+  return email.toLowerCase() === ALLOWED_EMAIL;
 }
 
 interface MatchRecord {

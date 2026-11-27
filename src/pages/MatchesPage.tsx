@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { Search, Calendar, MapPin, Trophy, Upload, Key, ChevronRight, Loader2, AlertCircle, CloudUpload, RefreshCw } from "lucide-react";
+import { Search, Calendar, MapPin, Trophy, Upload, Key, ChevronRight, Loader2, AlertCircle, CloudUpload, RefreshCw, LogOut } from "lucide-react";
 import type { Match } from "@/lib/types";
 import { supabase } from "@/lib/supabase";
 import type { ImportProgress, ImportResult } from "@/lib/uploadProgress";
@@ -10,6 +10,7 @@ interface MatchesPageProps {
 }
 
 export default function MatchesPage({ onNavigate, backgroundUpload }: MatchesPageProps) {
+  const [signingOut, setSigningOut] = useState(false);
   const [matches, setMatches] = useState<Match[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -93,6 +94,18 @@ export default function MatchesPage({ onNavigate, backgroundUpload }: MatchesPag
             >
               <Key size={16} />
               <span className="hidden sm:inline">API Keys</span>
+            </button>
+            <button
+              onClick={async () => {
+                setSigningOut(true);
+                await supabase.auth.signOut();
+              }}
+              disabled={signingOut}
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-700 px-3 py-2 text-sm font-medium text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors disabled:opacity-50"
+              title="Sign out"
+            >
+              <LogOut size={16} />
+              <span className="hidden sm:inline">Sign Out</span>
             </button>
           </div>
         </div>
